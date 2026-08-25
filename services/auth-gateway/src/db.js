@@ -52,6 +52,13 @@ export function applySchema(db) {
 export function openDb(filename) {
   const db = new Database(filename);
   db.pragma('foreign_keys = ON');
+  // WAL + a busy timeout let /verify (every proxied request) and bin/admin.js
+  // access the same file concurrently without blocking the event loop under
+  // SQLite's default rollback-journal locking (PR2a resilience finding).
+  // ':memory:' databases ignore 'journal_mode = WAL' (SQLite constraint) and
+  // stay in 'memory' mode, which is fine — WAL only matters for on-disk files.
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   applySchema(db);
   return db;
 }
