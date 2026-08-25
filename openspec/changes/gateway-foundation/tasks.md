@@ -69,16 +69,17 @@ stay near budget. PR1 (image+compose+Caddy) est. ~380 lines alone.
 
 ## Phase 3: Engram Stack & Docs (PR3)
 
-- [ ] 4.1 Human-gated: clone engram-monitor source into `services/engram-monitor/src/` (blocking)
-- [ ] 4.2 Read cloned source for real backend base-URL env var name; block if absent, never guess
-- [ ] 4.3 `services/engram-monitor/Dockerfile`: build `src/` on Node 22, serve `dist/` via nginx
-- [ ] 4.4 `services/engram-monitor/nginx.conf`: SPA fallback
-- [ ] 4.5 Extend `docker-compose.yml`: `engram-cloud`, `engram-cloud-db` (postgres, healthcheck, `depends_on: service_healthy`), `engram-monitor`
-- [ ] 4.6 Extend `Caddyfile`: `engram.{$DOMAIN}` route gated by `forward_auth`
-- [ ] 4.7 Verify mcp-atlassian per-request header name/scheme + multi-user flag against upstream source; adjust `atlassianAuthHeader()` only if wrong
-- [ ] 4.8 Finalize `.env.example`: engram-cloud/db, engram-monitor backend URL var
-- [ ] 4.9 `README.md`: setup, env contract, how to add a future MCP
-- [ ] 4.10 Pin `openspec/config.yaml` TBDs: `node --test`, `tsc --noEmit`, eslint/prettier
+- [x] 4.1 Human-gated: clone engram-monitor source into `services/engram-monitor/src/` (blocking) — done by the orchestrator before this apply batch; gitignored per `.gitignore`, not committed.
+- [x] 4.2 Read cloned source for real backend base-URL env var name; block if absent, never guess — resolved to `VITE_ENGRAM_URL` (`src/config/engram.ts`, Vite build-time env, default `http://127.0.0.1:7437`). Done by the orchestrator; used as-is in the Dockerfile ARG/ENV and compose `build.args`.
+- [x] 4.3 `services/engram-monitor/Dockerfile`: multi-stage — `node:22-bookworm-slim` build stage (pnpm, `ARG VITE_ENGRAM_URL` → `ENV` before `pnpm install && pnpm run build`), `nginx:alpine` final stage serving `dist/`.
+- [x] 4.4 `services/engram-monitor/nginx.conf`: SPA fallback (`try_files $uri $uri/ /index.html;`) on port 80.
+- [x] 4.5 Extend `docker-compose.yml`: added `engram-cloud-db` (postgres:16-alpine, `pg_isready` healthcheck), `engram-cloud` (`engram cloud serve` mode, port 18080, `depends_on: service_healthy`, no `ENGRAM_CLOUD_INSECURE_NO_AUTH`), `engram-monitor` (build with `VITE_ENGRAM_URL` arg). Also added `AUTH_GATEWAY_SESSION_SECRET` to the existing `auth-gateway` service (PR2b gap, `src/session.js` reads it but PR1's compose never declared it).
+- [x] 4.6 Extend `Caddyfile`: added `engram.{$DOMAIN}` (→ `engram-cloud:18080`) and `monitor.{$DOMAIN}` (→ `engram-monitor:80`) site blocks, both gated by the same `forward_auth` pattern as `/mcp/*` routes.
+- [x] 4.7 Verify mcp-atlassian per-request header name/scheme + multi-user flag against upstream source — CONFIRMED CORRECT via deepwiki against sooperset/mcp-atlassian's `UserTokenMiddleware`: `Authorization: Bearer <oauth>` / `Token <PAT>` / `Basic <base64>` per `scheme`, exactly matching the existing `atlassianAuthHeader()` in `services/auth-gateway/src/verify.js` (PR2b, unchanged). `ATLASSIAN_OAUTH_ENABLE=true` (PR1 compose) confirmed correct. No code change made — PR2b's reviewed `verify.js` was not touched. Follow-up flagged, not implemented here: `X-Atlassian-Cloud-Id` header for multi-cloud accounts, using the already-stored `atlassian_credentials.cloud_id` column.
+- [x] 4.8 Finalize `.env.example`: added `AUTH_GATEWAY_SESSION_SECRET`, `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN`/`ENGRAM_JWT_SECRET`/`ENGRAM_CLOUD_ALLOWED_PROJECTS`, `ENGRAM_CLOUD_DB_USER`/`ENGRAM_CLOUD_DB_PASSWORD`/`ENGRAM_CLOUD_DB_NAME`, `VITE_ENGRAM_URL` (with the compatibility caveat inline).
+- [x] 4.9 `README.md`: setup (env, manual clone, `config -q`, `up -d --build`), login/token flow via `bin/admin.js`, env var contract, "adding a new MCP" repeatable pattern, and the `VITE_ENGRAM_URL` compatibility caveat documented prominently.
+- [x] 4.10 Pin `openspec/config.yaml` TBDs: `runner: "node --test"`, `linter: "eslint"`, `type_checker: "plain JS + JSDoc, checked via tsc --noEmit"`, `formatter: "prettier"`; `testing.layers` updated to reflect unit/integration done, e2e not planned; also pinned the still-TBD `apply.test_command`/`verify.test_command` and refreshed stale `notes` (git init done, auth-gateway fully built).
+- [x] 4.11 (gap-fill, not in original task list) `services/auth-gateway/Dockerfile` + `.dockerignore`: `docker-compose.yml`'s `auth-gateway` service has referenced `build: context: ./services/auth-gateway` since PR1, but no Dockerfile existed until now — the service could never actually build. `node:22-bookworm-slim`, non-root `app` user (same pattern as the root `Dockerfile`), `npm ci --omit=dev` using the PR2a-committed `package-lock.json`, `/data` pre-created and chowned to `app` for the SQLite volume mount.
 
 ## Phase 4: Integration Verification (manual, apply gate)
 

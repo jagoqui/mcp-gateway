@@ -1,8 +1,8 @@
 name: mcp-gateway
 
-# PR1 scope only: caddy, auth-gateway, and the three pilot MCP services.
-# engram-cloud, engram-cloud-db, and engram-monitor are added in PR3
-# (see openspec/changes/gateway-foundation/tasks.md, Phase 3).
+# caddy, auth-gateway, the three pilot MCP services (PR1/PR2), plus
+# engram-cloud, engram-cloud-db, and engram-monitor (PR3 — see
+# openspec/changes/gateway-foundation/tasks.md, Phase 3).
 
 x-mcp-image: &mcp-image
   build:
@@ -34,10 +34,9 @@ services:
       - mcp-context7
       - mcp-atlassian
       - mcp-engram-tool
+      - engram-cloud
+      - engram-monitor
 
-  # services/auth-gateway is scaffolded as an empty placeholder in this PR
-  # (PR1); the real Express application lands in PR2a/PR2b. This service
-  # will not build successfully until then — expected for this slice.
   auth-gateway:
     build:
       context: ./services/auth-gateway
@@ -45,6 +44,7 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-jagoqui.tech}
       ATLASSIAN_ENC_KEY: ${ATLASSIAN_ENC_KEY}
+      AUTH_GATEWAY_SESSION_SECRET: ${AUTH_GATEWAY_SESSION_SECRET}
     volumes:
       - auth_gateway_data:/data
     networks:
@@ -97,6 +97,63 @@ services:
     expose:
       - "9000"
 
+  engram-cloud-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${ENGRAM_CLOUD_DB_USER}
+      POSTGRES_PASSWORD: ${ENGRAM_CLOUD_DB_PASSWORD}
+      POSTGRES_DB: ${ENGRAM_CLOUD_DB_NAME}
+    volumes:
+      - engram_cloud_db_data:/var/lib/postgresql/data
+    networks:
+      - gateway
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ENGRAM_CLOUD_DB_USER} -d ${ENGRAM_CLOUD_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Runs `engram cloud serve` — a DIFFERENT mode from the plain `engram serve`
+  # local API that engram-monitor (below) was built against. See
+  # services/engram-monitor/Dockerfile and README.md for the compatibility
+  # caveat. NEVER set ENGRAM_CLOUD_INSECURE_NO_AUTH here (local-dev-only,
+  # disables auth entirely) — not even as a commented example.
+  engram-cloud:
+    image: ghcr.io/gentleman-programming/engram:latest
+    restart: unless-stopped
+    environment:
+      ENGRAM_DATABASE_URL: postgres://${ENGRAM_CLOUD_DB_USER}:${ENGRAM_CLOUD_DB_PASSWORD}@engram-cloud-db:5432/${ENGRAM_CLOUD_DB_NAME}
+      ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN}
+      ENGRAM_CLOUD_ADMIN: ${ENGRAM_CLOUD_ADMIN}
+      ENGRAM_JWT_SECRET: ${ENGRAM_JWT_SECRET}
+      ENGRAM_CLOUD_ALLOWED_PROJECTS: ${ENGRAM_CLOUD_ALLOWED_PROJECTS}
+      ENGRAM_CLOUD_HOST: 0.0.0.0
+      ENGRAM_PORT: "18080"
+    depends_on:
+      engram-cloud-db:
+        condition: service_healthy
+    networks:
+      - gateway
+    expose:
+      - "18080"
+
+  # UNVERIFIED compatibility: this dashboard was built for a plain
+  # `engram serve` local API, not `engram cloud serve` (see Dockerfile).
+  # Smoke-test in Phase 4 before relying on it.
+  engram-monitor:
+    build:
+      context: ./services/engram-monitor
+      args:
+        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-http://engram-cloud:18080}
+    restart: unless-stopped
+    depends_on:
+      - engram-cloud
+    networks:
+      - gateway
+    expose:
+      - "80"
+
 networks:
   gateway:
     driver: bridge
@@ -105,3 +162,4 @@ volumes:
   caddy_data:
   caddy_config:
   auth_gateway_data:
+  engram_cloud_db_data:
