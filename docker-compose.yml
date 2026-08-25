@@ -1,0 +1,105 @@
+name: mcp-gateway
+
+# PR1 scope only: caddy, auth-gateway, and the three pilot MCP services.
+# engram-cloud, engram-cloud-db, and engram-monitor are added in PR3
+# (see openspec/changes/gateway-foundation/tasks.md, Phase 3).
+
+x-mcp-image: &mcp-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  networks:
+    - gateway
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-jagoqui.tech}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - gateway
+    depends_on:
+      - auth-gateway
+      - mcp-context7
+      - mcp-atlassian
+      - mcp-engram-tool
+
+  # services/auth-gateway is scaffolded as an empty placeholder in this PR
+  # (PR1); the real Express application lands in PR2a/PR2b. This service
+  # will not build successfully until then — expected for this slice.
+  auth-gateway:
+    build:
+      context: ./services/auth-gateway
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-jagoqui.tech}
+      ATLASSIAN_ENC_KEY: ${ATLASSIAN_ENC_KEY}
+    volumes:
+      - auth_gateway_data:/data
+    networks:
+      - gateway
+    expose:
+      - "3000"
+
+  mcp-context7:
+    <<: *mcp-image
+    command:
+      [
+        "supergateway",
+        "--stdio", "context7-mcp",
+        "--outputTransport", "streamableHttp",
+        "--port", "9000",
+        "--host", "0.0.0.0"
+      ]
+    environment:
+      CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}
+    expose:
+      - "9000"
+
+  mcp-atlassian:
+    <<: *mcp-image
+    command:
+      [
+        "mcp-atlassian",
+        "--transport", "streamable-http",
+        "--port", "9000",
+        "--host", "0.0.0.0"
+      ]
+    environment:
+      ATLASSIAN_URL: ${ATLASSIAN_URL}
+      ATLASSIAN_OAUTH_ENABLE: "true"
+    expose:
+      - "9000"
+
+  mcp-engram-tool:
+    <<: *mcp-image
+    command:
+      [
+        "supergateway",
+        "--stdio", "engram mcp",
+        "--outputTransport", "streamableHttp",
+        "--port", "9000",
+        "--host", "0.0.0.0"
+      ]
+    environment:
+      ENGRAM_API_KEY: ${ENGRAM_API_KEY}
+    expose:
+      - "9000"
+
+networks:
+  gateway:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
+  auth_gateway_data:
