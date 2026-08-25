@@ -75,3 +75,25 @@ auth.{$DOMAIN:jagoqui.tech} {
 		reverse_proxy auth-gateway:3000
 	}
 }
+
+# UNVERIFIED compatibility: engram-cloud runs `engram cloud serve` (sync/
+# dashboard API), not the plain `engram serve` local API engram-monitor's
+# own UI was built against. See README.md's compatibility caveat and
+# services/engram-monitor/Dockerfile before relying on this route.
+engram.{$DOMAIN:jagoqui.tech} {
+	forward_auth auth-gateway:3000 {
+		uri /verify
+		import strip_gateway_headers
+		copy_headers X-Gateway-User X-Gateway-User-Id
+	}
+	reverse_proxy engram-cloud:18080
+}
+
+monitor.{$DOMAIN:jagoqui.tech} {
+	forward_auth auth-gateway:3000 {
+		uri /verify
+		import strip_gateway_headers
+		copy_headers X-Gateway-User X-Gateway-User-Id
+	}
+	reverse_proxy engram-monitor:80
+}
