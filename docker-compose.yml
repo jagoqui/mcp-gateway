@@ -8,6 +8,8 @@ x-mcp-image: &mcp-image
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      ENGRAM_VERSION: ${ENGRAM_VERSION:-}
   restart: unless-stopped
   networks:
     - gateway
