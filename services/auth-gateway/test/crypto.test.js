@@ -51,3 +51,9 @@ test('encrypt throws a clear error when ATLASSIAN_ENC_KEY does not decode to 32 
     process.env.ATLASSIAN_ENC_KEY = original;
   }
 });
+
+test('decrypt throws a clear error on a truncated payload shorter than IV+tag length', () => {
+  // IV_LENGTH (12) + TAG_LENGTH (16) = 28 bytes minimum; use 10 raw bytes.
+  const tooShort = Buffer.alloc(10, 1).toString('base64');
+  assert.throws(() => decrypt(tooShort), /at least 28 bytes/);
+});
