@@ -15,9 +15,7 @@ test('createUser inserts a user with a bcrypt-hashed password', async () => {
   assert.equal(user.username, 'alice');
   assert.ok(user.id > 0);
 
-  const row = /** @type {any} */ (
-    db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
-  );
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(user.id));
   assert.notEqual(row.password_hash, 'a-strong-password');
   assert.equal(await verifyPassword('a-strong-password', row.password_hash), true);
   db.close();
