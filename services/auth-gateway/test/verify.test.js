@@ -1,0 +1,246 @@
+import { test, before, beforeEach, afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { openDb } from '../src/db.js';
+import { hashToken, hashPassword } from '../src/tokens.js';
+import { encrypt } from '../src/crypto.js';
+import { createSessionToken, serializeSessionCookie } from '../src/session.js';
+import { createServer } from '../src/app.js';
+
+const DOMAIN = 'test.example';
+const SESSION_SECRET = 'test-session-secret';
+
+before(() => {
+  process.env.ATLASSIAN_ENC_KEY = crypto.randomBytes(32).toString('base64');
+  process.env.AUTH_GATEWAY_SESSION_SECRET = SESSION_SECRET;
+});
+
+/** @type {import('better-sqlite3').Database} */
+let db;
+/** @type {import('node:http').Server} */
+let server;
+/** @type {string} */
+let baseUrl;
+
+beforeEach(async () => {
+  db = openDb(':memory:');
+  server = createServer(db, { domain: DOMAIN, sessionSecret: SESSION_SECRET });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const address = /** @type {import('node:net').AddressInfo} */ (server.address());
+  baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+afterEach(async () => {
+  await new Promise((resolve) => server.close(resolve));
+  db.close();
+});
+
+/**
+ * @param {{ username?: string, password?: string, disabled?: boolean, admin?: boolean }} [opts]
+ */
+function insertUser(opts = {}) {
+  const { username = 'alice', password = 'irrelevant-for-token-tests', disabled = false } = opts;
+  const info = db
+    .prepare(
+      'INSERT INTO users (username, password_hash, disabled_at) VALUES (?, ?, ?)',
+    )
+    .run(username, `bcrypt-placeholder-${password}`, disabled ? '2024-01-01T00:00:00Z' : null);
+  return Number(info.lastInsertRowid);
+}
+
+function insertToken(userId, rawToken, opts = {}) {
+  const { revoked = false } = opts;
+  db.prepare(
+    'INSERT INTO tokens (user_id, token_hash, revoked_at) VALUES (?, ?, ?)',
+  ).run(userId, hashToken(rawToken), revoked ? '2024-01-01T00:00:00Z' : null);
+}
+
+function insertAtlassianCredential(userId, opts = {}) {
+  const { scheme = 'Token', plaintext = 'atlassian-pat-value' } = opts;
+  db.prepare(
+    "INSERT INTO atlassian_credentials (user_id, scheme, ciphertext, updated_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(userId, scheme, encrypt(plaintext));
+  return plaintext;
+}
+
+// --- 3.1: 204 valid Bearer / valid cookie; 401 absent/invalid/revoked/disabled ---
+
+test('GET /verify returns 204 for a valid Bearer token', async () => {
+  const userId = insertUser({ username: 'alice' });
+  insertToken(userId, 'raw-token-alice');
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Authorization: 'Bearer raw-token-alice' },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('x-gateway-user'), 'alice');
+  assert.equal(res.headers.get('x-gateway-user-id'), String(userId));
+});
+
+test('GET /verify returns 204 for a valid session cookie', async () => {
+  const userId = insertUser({ username: 'bob' });
+  const token = createSessionToken({ uid: userId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Cookie: `session=${token}` },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('x-gateway-user'), 'bob');
+  assert.equal(res.headers.get('x-gateway-user-id'), String(userId));
+});
+
+test('GET /verify returns 401 when no credential is present', async () => {
+  const res = await fetch(`${baseUrl}/verify`);
+  assert.equal(res.status, 401);
+  assert.match(res.headers.get('www-authenticate') ?? '', /Bearer/);
+});
+
+test('GET /verify returns 401 for an invalid Bearer token', async () => {
+  const userId = insertUser({ username: 'carol' });
+  insertToken(userId, 'the-real-token');
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Authorization: 'Bearer a-wrong-token' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /verify returns 401 for a revoked token', async () => {
+  const userId = insertUser({ username: 'dave' });
+  insertToken(userId, 'revoked-token', { revoked: true });
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Authorization: 'Bearer revoked-token' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /verify returns 401 for a valid token belonging to a disabled user', async () => {
+  const userId = insertUser({ username: 'erin', disabled: true });
+  insertToken(userId, 'erins-token');
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Authorization: 'Bearer erins-token' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /verify returns 401 for a session cookie referencing a disabled user', async () => {
+  const userId = insertUser({ username: 'frank', disabled: true });
+  const token = createSessionToken({ uid: userId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Cookie: `session=${token}` },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /verify returns 401 for a tampered/invalid session cookie', async () => {
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Cookie: 'session=not-a-real-token.deadbeef' },
+  });
+  assert.equal(res.status, 401);
+});
+
+// --- 3.2: 302 to auth.{$DOMAIN}/login?next= when Accept: text/html ---
+
+test('GET /verify redirects to the login page for browser (Accept: text/html) requests without credentials', async () => {
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Accept: 'text/html,application/xhtml+xml',
+      'X-Forwarded-Uri': '/mcp/context7/some/page',
+    },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  const location = res.headers.get('location');
+  assert.ok(location, 'expected a Location header');
+  assert.match(location ?? '', new RegExp(`^https://auth\\.${DOMAIN}/login\\?next=`));
+  assert.match(location ?? '', /mcp%2Fcontext7%2Fsome%2Fpage|mcp\/context7\/some\/page/);
+});
+
+test('GET /verify still returns plain 401 (not a redirect) when Accept does not indicate a browser', async () => {
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { Accept: 'application/json' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 401);
+});
+
+// --- 3.3: 403 Atlassian route, no enrolled credential ---
+
+test('GET /verify returns 403 for an authenticated user hitting an Atlassian route with no enrolled credential', async () => {
+  const userId = insertUser({ username: 'grace' });
+  insertToken(userId, 'graces-token');
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Authorization: 'Bearer graces-token',
+      'X-Forwarded-Uri': '/mcp/atlassian/jira/search',
+    },
+  });
+  assert.equal(res.status, 403);
+  const body = await res.json();
+  assert.match(JSON.stringify(body), /atlassian/i);
+});
+
+test('GET /verify returns 204 with X-Atlassian-Authorization for an authenticated user with an enrolled credential on an Atlassian route', async () => {
+  const userId = insertUser({ username: 'heidi' });
+  insertToken(userId, 'heidis-token');
+  const plaintext = insertAtlassianCredential(userId, { scheme: 'Token' });
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Authorization: 'Bearer heidis-token',
+      'X-Forwarded-Uri': '/mcp/atlassian/jira/search',
+    },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('x-atlassian-authorization'), `Token ${plaintext}`);
+});
+
+// --- 3.4: threat — header spoofing: /verify ignores client-supplied X-Gateway-User ---
+
+test('threat: an unauthenticated request with a spoofed X-Gateway-User header is still rejected with 401', async () => {
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: { 'X-Gateway-User': 'attacker-controlled-identity' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('threat: an authenticated request with a spoofed X-Gateway-User header gets the real server-derived identity back, not the spoofed one', async () => {
+  const userId = insertUser({ username: 'ivan' });
+  insertToken(userId, 'ivans-token');
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Authorization: 'Bearer ivans-token',
+      'X-Gateway-User': 'attacker-controlled-identity',
+      'X-Gateway-User-Id': '999999',
+    },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('x-gateway-user'), 'ivan');
+  assert.equal(res.headers.get('x-gateway-user-id'), String(userId));
+});
+
+// --- 3.5: threat — secret over-forward: X-Atlassian-Authorization omitted off-route ---
+
+test('threat: X-Atlassian-Authorization is omitted on a non-Atlassian route even with an enrolled credential', async () => {
+  const userId = insertUser({ username: 'judy' });
+  insertToken(userId, 'judys-token');
+  insertAtlassianCredential(userId);
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Authorization: 'Bearer judys-token',
+      'X-Forwarded-Uri': '/mcp/context7/some/tool',
+    },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('x-atlassian-authorization'), null);
+});
+
+test('threat: a path-traversal X-Forwarded-Uri (/mcp/atlassian/../context7) does not leak X-Atlassian-Authorization', async () => {
+  const userId = insertUser({ username: 'karl' });
+  insertToken(userId, 'karls-token');
+  insertAtlassianCredential(userId);
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Authorization: 'Bearer karls-token',
+      'X-Forwarded-Uri': '/mcp/atlassian/../context7',
+    },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('x-atlassian-authorization'), null);
+});
