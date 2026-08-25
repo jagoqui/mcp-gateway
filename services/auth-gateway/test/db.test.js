@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { openDb } from '../src/db.js';
 
 test('openDb creates the users, tokens, and atlassian_credentials tables', () => {
@@ -31,6 +35,22 @@ test('deleting a user cascades to delete their tokens (foreign keys enforced)', 
   );
   assert.equal(remaining.n, 0);
   db.close();
+});
+
+test('openDb enables WAL journal mode for on-disk databases (concurrent access safety)', () => {
+  // ':memory:' databases cannot use WAL (SQLite constraint) — a real
+  // on-disk file is required to observe this pragma taking effect.
+  const file = path.join(os.tmpdir(), `auth-gateway-test-${crypto.randomUUID()}.sqlite`);
+  const db = openDb(file);
+  try {
+    const journalMode = db.pragma('journal_mode', { simple: true });
+    assert.equal(journalMode, 'wal');
+  } finally {
+    db.close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      fs.rmSync(file + suffix, { force: true });
+    }
+  }
 });
 
 test('atlassian_credentials.user_id is unique per user (one credential row per person)', () => {
