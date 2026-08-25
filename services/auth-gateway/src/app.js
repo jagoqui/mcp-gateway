@@ -31,26 +31,31 @@ function resolveConfig(appConfig) {
  * @param {{ domain: string, sessionSecret: string }} config
  */
 function handleVerify(req, res, db, config) {
-  const decision = decideVerify(
-    db,
-    {
-      authorization: req.headers.authorization,
-      cookie: req.headers.cookie,
-      accept: req.headers.accept,
-      forwardedUri: /** @type {string | undefined} */ (req.headers['x-forwarded-uri']),
-    },
-    config,
-  );
+  let decision;
+  try {
+    decision = decideVerify(
+      db,
+      {
+        authorization: req.headers.authorization,
+        cookie: req.headers.cookie,
+        accept: req.headers.accept,
+        forwardedUri: /** @type {string | undefined} */ (req.headers['x-forwarded-uri']),
+      },
+      config,
+    );
+  } catch {
+    // e.g. a mis-configured ATLASSIAN_ENC_KEY blowing up decrypt() —
+    // never let that leak into an unauthenticated 5xx-with-body response.
+    sendJson(res, 500, { error: 'internal_error' });
+    return;
+  }
 
   for (const [key, value] of Object.entries(decision.headers)) {
     res.setHeader(key, value);
   }
 
   if (decision.body !== undefined) {
-    const json = JSON.stringify(decision.body);
-    res.setHeader('Content-Type', 'application/json');
-    res.writeHead(decision.status);
-    res.end(json);
+    sendJson(res, decision.status, decision.body);
     return;
   }
 
@@ -197,6 +202,22 @@ async function handleEnrollAtlassian(req, res, db, config) {
 }
 
 /**
+ * Runs an async route handler, converting any uncaught rejection into a
+ * generic 500 response instead of letting it crash the process. Shared by
+ * every POST route so each handler only needs to worry about its own
+ * expected failure modes (400/401/etc).
+ * @param {Promise<void>} handlerPromise
+ * @param {import('node:http').ServerResponse} res
+ */
+function runAsyncHandler(handlerPromise, res) {
+  handlerPromise.catch(() => {
+    if (!res.headersSent) {
+      sendJson(res, 500, { error: 'internal_error' });
+    }
+  });
+}
+
+/**
  * Creates the auth-gateway request listener (a plain node:http handler —
  * no framework dependency needed for this small, ~4-route surface).
  * @param {import('better-sqlite3').Database} db
@@ -214,20 +235,12 @@ export function createApp(db, appConfig = {}) {
     }
 
     if (req.method === 'POST' && pathname === '/login') {
-      handleLogin(req, res, db, resolveConfig(appConfig)).catch(() => {
-        if (!res.headersSent) {
-          sendJson(res, 500, { error: 'internal_error' });
-        }
-      });
+      runAsyncHandler(handleLogin(req, res, db, resolveConfig(appConfig)), res);
       return;
     }
 
     if (req.method === 'POST' && pathname === '/me/atlassian') {
-      handleEnrollAtlassian(req, res, db, resolveConfig(appConfig)).catch(() => {
-        if (!res.headersSent) {
-          sendJson(res, 500, { error: 'internal_error' });
-        }
-      });
+      runAsyncHandler(handleEnrollAtlassian(req, res, db, resolveConfig(appConfig)), res);
       return;
     }
 
