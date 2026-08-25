@@ -1,9 +1,10 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
-import { decideVerify } from './verify.js';
+import { decideVerify, authenticate } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
+import { encrypt } from './crypto.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -146,6 +147,56 @@ async function handleLogin(req, res, db, config) {
 }
 
 /**
+ * POST /me/atlassian — an authenticated route (same Bearer/cookie check as
+ * /verify) that encrypts and upserts the caller's Atlassian credential.
+ * Identity is always taken from the authenticated session, never from the
+ * request body, so a client can never write another user's credential row.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string, sessionSecret: string }} config
+ */
+async function handleEnrollAtlassian(req, res, db, config) {
+  const user = authenticate(
+    db,
+    { authorization: req.headers.authorization, cookie: req.headers.cookie },
+    config.sessionSecret,
+  );
+  if (!user) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  /** @type {any} */
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  const { token, scheme, cloudId } = body ?? {};
+  if (typeof token !== 'string' || !token || typeof scheme !== 'string' || !scheme) {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  const ciphertext = encrypt(token);
+  db.prepare(
+    `INSERT INTO atlassian_credentials (user_id, scheme, ciphertext, cloud_id, updated_at)
+     VALUES (?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(user_id) DO UPDATE SET
+       scheme = excluded.scheme,
+       ciphertext = excluded.ciphertext,
+       cloud_id = excluded.cloud_id,
+       updated_at = excluded.updated_at`,
+  ).run(user.id, scheme, ciphertext, typeof cloudId === 'string' ? cloudId : null);
+
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Creates the auth-gateway request listener (a plain node:http handler —
  * no framework dependency needed for this small, ~4-route surface).
  * @param {import('better-sqlite3').Database} db
@@ -164,6 +215,15 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'POST' && pathname === '/login') {
       handleLogin(req, res, db, resolveConfig(appConfig)).catch(() => {
+        if (!res.headersSent) {
+          sendJson(res, 500, { error: 'internal_error' });
+        }
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/me/atlassian') {
+      handleEnrollAtlassian(req, res, db, resolveConfig(appConfig)).catch(() => {
         if (!res.headersSent) {
           sendJson(res, 500, { error: 'internal_error' });
         }
