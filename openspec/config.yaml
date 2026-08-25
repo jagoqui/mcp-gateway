@@ -1,0 +1,71 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  Project: mcp-gateway (Docker Compose infra for MCP servers).
+  Stack: Dockerfile (shared base runtime), docker-compose.yml, Caddyfile
+    (reverse proxy + auth gate), plus one real app service: auth-gateway
+    (Node.js/Express + SQLite, login/token issuance).
+  Architecture: infra-as-code (Docker/Compose/Caddy) hosting several
+    MCP servers behind a reverse-proxy auth gate; auth-gateway is the
+    only unit-testable application code.
+  Testing: auth-gateway warrants strict TDD with a real runner
+    (node --test or vitest, TBD at first code commit). Dockerfile,
+    docker-compose.yml, Caddyfile, and shell scripts are infra/config,
+    not unit-testable in the traditional TDD sense.
+  Repo state: directory not yet a git repo (git init pending). RDD
+    (gentle-ai review mode) cannot be enabled until git init happens.
+
+strict_tdd: true
+
+testing:
+  scope: "auth-gateway only; infra/config artifacts are excluded from TDD"
+  runner: "node --test or vitest (TBD — decide at first auth-gateway commit)"
+  layers:
+    unit: pending
+    integration: pending (e.g. supertest against Express app)
+    e2e: not planned
+  coverage:
+    available: false
+    command: ""
+  quality_tools:
+    linter: "TBD (eslint likely)"
+    type_checker: "TBD (plain JS or TypeScript — undecided)"
+    formatter: "TBD (prettier likely)"
+  non_testable_artifacts:
+    - Dockerfile
+    - docker-compose.yml
+    - Caddyfile
+    - shell scripts
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Call out which parts of a change are infra/config (no TDD) vs. app code (strict TDD)
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - auth-gateway specs MUST define testable scenarios; infra specs describe desired state/behavior, not unit tests
+  design:
+    - Include sequence diagrams for complex flows (e.g. login/token issuance through Caddy to auth-gateway)
+    - Document architecture decisions with rationale (e.g. shared base image strategy, Caddy auth gate placement)
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Separate infra/config tasks (Dockerfile, compose, Caddyfile) from strict-TDD auth-gateway tasks
+  apply:
+    guidelines:
+      - Follow existing code patterns once auth-gateway scaffolding exists
+      - RED-GREEN-REFACTOR applies only to auth-gateway application code
+    tdd: true
+    test_command: "TBD (node --test or vitest, set at first auth-gateway commit)"
+  verify:
+    test_command: "TBD"
+    build_command: "docker compose build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+
+notes:
+  - "git init has not been run yet in this directory; RDD (gentle-ai review mode) requires git and is deferred until after git init."
+  - "services/auth-gateway and services/engram-monitor exist as empty placeholder directories; engram-monitor was not mentioned in the original task scope and should be scoped/clarified before implementation."

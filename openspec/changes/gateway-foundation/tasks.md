@@ -1,0 +1,89 @@
+# Tasks: Gateway Foundation
+
+## Review Workload Forecast
+
+| Field | Value |
+|-------|-------|
+| Estimated changed lines | ~1,300-1,700 total (4 slices; largest ~450) |
+| 400-line budget risk | High |
+| Chained PRs recommended | Yes |
+| Suggested split | PR1 → PR2a → PR2b → PR3 (refines proposal's 3-slice guess) |
+| Delivery strategy | ask-on-risk |
+| Chain strategy | pending (recommend feature-branch-chain) |
+
+Decision needed before apply: Yes
+Chained PRs recommended: Yes
+Chain strategy: pending
+400-line budget risk: High
+
+Rationale: 19 requirements / 35 scenarios, 5 specs. auth-gateway alone (11
+scenarios + 2 threat-matrix RED tests, test-first) est. ~700-800 lines, so
+"auth-gateway" splits into 2a (data/crypto) and 2b (verify/login/admin) to
+stay near budget. PR1 (image+compose+Caddy) est. ~380 lines alone.
+
+### Suggested Work Units
+
+| Unit | Goal | PR | Focused test cmd | Runtime harness | Rollback boundary |
+|------|------|-----|-------------------|-----------------|-------------------|
+| 1 | Dockerfile + 5-svc compose + Caddyfile + env/gitignore | PR1 | `docker compose config -q` | `docker compose build` cold-cache | Revert 5 files; `compose down -v` |
+| 2a | auth-gateway db/crypto/token-hash | PR2a | `node --test test/{crypto,tokens}.test.js` | N/A — pure unit logic | Delete `src/{db,crypto,tokens}.js`+tests |
+| 2b | auth-gateway verify/login/enrollment/admin | PR2b | `node --test test/{verify,login,enrollment}.test.js` | `listen(0)`+`fetch`, temp SQLite | Delete `src/{app,verify}.js`,`bin/admin.js`+tests |
+| 3 | engram-monitor image + compose/Caddy ext + docs | PR3 | N/A — infra, not unit-testable | `compose up -d engram-* caddy` + curl | Delete engram-monitor files; revert compose/Caddyfile diffs |
+
+## Phase 1: Container & Compose Foundation (PR1)
+
+- [ ] 1.1 `Dockerfile` stage `base`: node:22-bookworm-slim, tini, non-root `app`
+- [ ] 1.2 `Dockerfile` stage `artifacts`: GitHub `latest` API resolve (`ENGRAM_VERSION` ARG override), download binary + `checksums.txt`, `sha256sum -c`
+- [ ] 1.3 `Dockerfile` stage `pytools`: pinned `uv`, `uv tool install mcp-atlassian==<pin>`
+- [ ] 1.4 `Dockerfile` stage `nodetools`: pinned `supergateway`, no runtime network
+- [ ] 1.5 `Dockerfile` stage `runtime`: copy artifact trees, `tini` entrypoint, run as `app`
+- [ ] 1.6 `docker-compose.yml`: `caddy`, `auth-gateway`, `mcp-context7`, `mcp-atlassian` (`--transport streamable-http`), `mcp-engram-tool`; one bridge net; fixed `supergateway --stdio` strings; only `caddy` publishes
+- [ ] 1.7 `Caddyfile`: subdomain routes, `/login`+`/verify` excluded from `forward_auth`, strip inbound `X-Gateway-*`/`X-Atlassian-*`, `copy_headers` scoped to `/mcp/atlassian*`
+- [ ] 1.8 `.env.example`: DOMAIN, ATLASSIAN_ENC_KEY, mcp credentials
+- [ ] 1.9 `.gitignore`: `.env`, `*.sqlite`, `node_modules`, `dist`
+- [ ] 1.10 Verify: `docker compose config -q`, cold-cache `docker compose build`
+
+## Phase 2a: Auth-Gateway Data/Crypto Layer (PR2a, strict TDD)
+
+- [ ] 2.1 RED `test/crypto.test.js`: AES-256-GCM round-trip via `ATLASSIAN_ENC_KEY`
+- [ ] 2.2 GREEN `src/crypto.js`
+- [ ] 2.3 RED `test/tokens.test.js`: SHA-256 hash + `timingSafeEqual`, bcrypt password verify
+- [ ] 2.4 GREEN `src/tokens.js`
+- [ ] 2.5 `src/db.js`: better-sqlite3 schema `users`, `tokens` (`UNIQUE token_hash`), `atlassian_credentials`
+- [ ] 2.6 REFACTOR: shared db helpers; `tsc --noEmit`; eslint/prettier
+
+## Phase 2b: Verify/Login/Enrollment/Admin (PR2b, strict TDD)
+
+- [ ] 3.1 RED `test/verify.test.js`: 204 valid Bearer / valid cookie; 401 absent/invalid/revoked/disabled
+- [ ] 3.2 RED `test/verify.test.js`: 302 to `auth.{$DOMAIN}/login?next=` when `Accept: text/html`
+- [ ] 3.3 RED `test/verify.test.js`: 403 Atlassian route, no enrolled credential
+- [ ] 3.4 RED (threat: header spoofing): `/verify` ignores client-supplied `X-Gateway-User`
+- [ ] 3.5 RED (threat: secret over-forward): `X-Atlassian-Authorization` omitted on `/mcp/context7` and `/mcp/atlassian/../context7`
+- [ ] 3.6 GREEN `src/verify.js`: route-scoping via `X-Forwarded-Uri`
+- [ ] 3.7 RED `test/login.test.js`: `POST /login` issues HttpOnly session cookie
+- [ ] 3.8 GREEN `POST /login` in `src/app.js`
+- [ ] 3.9 RED `test/enrollment.test.js`: `POST /me/atlassian` stores encrypted credential
+- [ ] 3.10 GREEN enrollment route
+- [ ] 3.11 `bin/admin.js`: create user, issue token (shown once), revoke token
+- [ ] 3.12 REFACTOR: mount all routes in `src/app.js`; `tsc --noEmit`; eslint/prettier
+
+## Phase 3: Engram Stack & Docs (PR3)
+
+- [ ] 4.1 Human-gated: clone engram-monitor source into `services/engram-monitor/src/` (blocking)
+- [ ] 4.2 Read cloned source for real backend base-URL env var name; block if absent, never guess
+- [ ] 4.3 `services/engram-monitor/Dockerfile`: build `src/` on Node 22, serve `dist/` via nginx
+- [ ] 4.4 `services/engram-monitor/nginx.conf`: SPA fallback
+- [ ] 4.5 Extend `docker-compose.yml`: `engram-cloud`, `engram-cloud-db` (postgres, healthcheck, `depends_on: service_healthy`), `engram-monitor`
+- [ ] 4.6 Extend `Caddyfile`: `engram.{$DOMAIN}` route gated by `forward_auth`
+- [ ] 4.7 Verify mcp-atlassian per-request header name/scheme + multi-user flag against upstream source; adjust `atlassianAuthHeader()` only if wrong
+- [ ] 4.8 Finalize `.env.example`: engram-cloud/db, engram-monitor backend URL var
+- [ ] 4.9 `README.md`: setup, env contract, how to add a future MCP
+- [ ] 4.10 Pin `openspec/config.yaml` TBDs: `node --test`, `tsc --noEmit`, eslint/prettier
+
+## Phase 4: Integration Verification (manual, apply gate)
+
+- [ ] 5.1 `docker compose up -d`; all services reach healthy
+- [ ] 5.2 curl unauthenticated `/mcp/*` → 401 on all 3 pilots
+- [ ] 5.3 curl spoofed `X-Gateway-User` → still 401 (threat-matrix smoke)
+- [ ] 5.4 Authenticated `initialize` succeeds: context7, mcp-atlassian, engram MCP
+- [ ] 5.5 Real MCP client connects with only URL + token
