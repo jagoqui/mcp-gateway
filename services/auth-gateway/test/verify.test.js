@@ -253,3 +253,27 @@ test('threat: a path-traversal X-Forwarded-Uri (/mcp/atlassian/../context7) does
   assert.equal(res.status, 204);
   assert.equal(res.headers.get('x-atlassian-authorization'), null);
 });
+
+// --- correction: a missing AUTH_GATEWAY_SESSION_SECRET must not crash the process ---
+
+test('GET /verify returns a graceful 500 (not a process crash) when AUTH_GATEWAY_SESSION_SECRET is unset', async () => {
+  // Mirrors production's real main(), which calls createServer(db, {}) with
+  // no sessionSecret in appConfig — resolveConfig() then falls through to
+  // getSessionSecret(), which throws when the env var is unset.
+  const original = process.env.AUTH_GATEWAY_SESSION_SECRET;
+  delete process.env.AUTH_GATEWAY_SESSION_SECRET;
+  const unconfiguredDb = openDb(':memory:');
+  const unconfiguredServer = createServer(unconfiguredDb, { domain: DOMAIN });
+  try {
+    await new Promise((resolve) => unconfiguredServer.listen(0, () => resolve(undefined)));
+    const address = /** @type {import('node:net').AddressInfo} */ (unconfiguredServer.address());
+    const res = await fetch(`http://127.0.0.1:${address.port}/verify`);
+    assert.equal(res.status, 500);
+    const body = /** @type {any} */ (await res.json());
+    assert.equal(body.error, 'internal_error');
+  } finally {
+    await new Promise((resolve) => unconfiguredServer.close(() => resolve(undefined)));
+    unconfiguredDb.close();
+    process.env.AUTH_GATEWAY_SESSION_SECRET = original;
+  }
+});

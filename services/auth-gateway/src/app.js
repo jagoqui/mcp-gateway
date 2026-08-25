@@ -229,18 +229,32 @@ export function createApp(db, appConfig = {}) {
     const url = new URL(req.url ?? '/', 'http://internal');
     const { pathname } = url;
 
+    // resolveConfig() can throw synchronously (e.g. AUTH_GATEWAY_SESSION_SECRET
+    // unset) — this try/catch is the ONLY thing standing between that throw
+    // and an uncaught exception crashing the whole process, since it happens
+    // before handleVerify's own try/catch or handleLogin/handleEnrollAtlassian's
+    // runAsyncHandler(...).catch() ever run. Every route goes through here.
+    /** @type {{ domain: string, sessionSecret: string } | undefined} */
+    let config;
+    try {
+      config = resolveConfig(appConfig);
+    } catch {
+      sendJson(res, 500, { error: 'internal_error' });
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/verify') {
-      handleVerify(req, res, db, resolveConfig(appConfig));
+      handleVerify(req, res, db, config);
       return;
     }
 
     if (req.method === 'POST' && pathname === '/login') {
-      runAsyncHandler(handleLogin(req, res, db, resolveConfig(appConfig)), res);
+      runAsyncHandler(handleLogin(req, res, db, config), res);
       return;
     }
 
     if (req.method === 'POST' && pathname === '/me/atlassian') {
-      runAsyncHandler(handleEnrollAtlassian(req, res, db, resolveConfig(appConfig)), res);
+      runAsyncHandler(handleEnrollAtlassian(req, res, db, config), res);
       return;
     }
 
