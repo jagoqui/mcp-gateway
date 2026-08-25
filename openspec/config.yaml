@@ -9,29 +9,30 @@ context: |
   Architecture: infra-as-code (Docker/Compose/Caddy) hosting several
     MCP servers behind a reverse-proxy auth gate; auth-gateway is the
     only unit-testable application code.
-  Testing: auth-gateway warrants strict TDD with a real runner
-    (node --test or vitest, TBD at first code commit). Dockerfile,
-    docker-compose.yml, Caddyfile, and shell scripts are infra/config,
-    not unit-testable in the traditional TDD sense.
-  Repo state: directory not yet a git repo (git init pending). RDD
-    (gentle-ai review mode) cannot be enabled until git init happens.
+  Testing: auth-gateway warrants strict TDD with `node --test` (built into
+    Node 22, zero runtime deps). Dockerfile, docker-compose.yml, Caddyfile,
+    and shell scripts are infra/config, not unit-testable in the
+    traditional TDD sense.
+  Repo state: git repo on chained feature branches
+    (feat/gateway-foundation-01..03). RDD (gentle-ai review mode) is
+    user-opt-in and off by default.
 
 strict_tdd: true
 
 testing:
   scope: "auth-gateway only; infra/config artifacts are excluded from TDD"
-  runner: "node --test or vitest (TBD — decide at first auth-gateway commit)"
+  runner: "node --test"
   layers:
-    unit: pending
-    integration: pending (e.g. supertest against Express app)
-    e2e: not planned
+    unit: "done — token hash/compare, AES-GCM round-trip, bcrypt verify, db schema (test/{crypto,tokens,db}.test.js)"
+    integration: "done — listen(0) + fetch against a temp SQLite db (test/{verify,login,enrollment,admin}.test.js)"
+    e2e: "not planned (manual apply-gate smoke script covers Phase 4 instead, see tasks.md 5.x)"
   coverage:
     available: false
     command: ""
   quality_tools:
-    linter: "TBD (eslint likely)"
-    type_checker: "TBD (plain JS or TypeScript — undecided)"
-    formatter: "TBD (prettier likely)"
+    linter: "eslint"
+    type_checker: "plain JS + JSDoc, checked via tsc --noEmit"
+    formatter: "prettier"
   non_testable_artifacts:
     - Dockerfile
     - docker-compose.yml
@@ -58,14 +59,14 @@ rules:
       - Follow existing code patterns once auth-gateway scaffolding exists
       - RED-GREEN-REFACTOR applies only to auth-gateway application code
     tdd: true
-    test_command: "TBD (node --test or vitest, set at first auth-gateway commit)"
+    test_command: "npm --prefix services/auth-gateway test"
   verify:
-    test_command: "TBD"
-    build_command: "docker compose build"
+    test_command: "npm --prefix services/auth-gateway test"
+    build_command: "docker compose config -q"
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas
 
 notes:
-  - "git init has not been run yet in this directory; RDD (gentle-ai review mode) requires git and is deferred until after git init."
-  - "services/auth-gateway and services/engram-monitor exist as empty placeholder directories; engram-monitor was not mentioned in the original task scope and should be scoped/clarified before implementation."
+  - "git init has run; the repo is on feature branches (feat/gateway-foundation-*) chained via feature-branch-chain PRs. RDD (gentle-ai review mode) remains user-opt-in, unrelated to git init status."
+  - "services/auth-gateway is a fully built and tested Express app (PR2a/PR2b). services/engram-monitor has a Dockerfile/nginx.conf (PR3); its src/ is a gitignored manual clone of github.com/egdev6/engram-monitor, not committed to this repo."

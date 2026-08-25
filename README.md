@@ -1,0 +1,177 @@
+# mcp-gateway
+
+Self-hosted, single-perimeter access to MCP servers for the team. One URL,
+one Bearer token per person, instead of ~20 locally-installed binaries per
+teammate. `Caddy` terminates TLS and gates every route through
+`auth-gateway`'s `forward_auth` check; `docker-compose.yml` runs one shared
+runtime image under a different command per MCP.
+
+## Quick path
+
+1. Copy the env template and fill in real values:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   See [Environment variables](#environment-variables) below for what each
+   key means and how to generate secrets.
+
+2. Clone the engram-monitor dashboard source (not vendored — gitignored,
+   see [`services/engram-monitor/src/`](#engram-monitor-source-manual-clone)):
+
+   ```bash
+   git clone https://github.com/egdev6/engram-monitor.git services/engram-monitor/src
+   ```
+
+3. Validate the compose file (no Docker daemon needed):
+
+   ```bash
+   docker compose config -q
+   ```
+
+4. Build and start everything:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+5. Create your first admin user and log in — see
+   [Logging in](#logging-in--getting-a-token) below.
+
+## Architecture
+
+```
+client ──Authorization: Bearer <token>──▶ Caddy :443
+                                           │ forward_auth → auth-gateway:3000 /verify
+                                           ▼
+                          mcp-context7 / mcp-atlassian / mcp-engram-tool
+```
+
+- **`Dockerfile`** — one multi-stage image (Node 22 + `uv` + `supergateway`
+  + the `engram` binary). `docker-compose.yml` runs it under a different
+  `command:` per pilot MCP (`mcp-context7`, `mcp-atlassian`,
+  `mcp-engram-tool`).
+- **`Caddyfile`** — the only published surface. Every route except
+  `auth.{$DOMAIN}/login` and `/verify` requires a passing `forward_auth`
+  call to `auth-gateway`.
+- **`services/auth-gateway/`** — Express app: issues/validates Bearer
+  tokens and session cookies, brokers per-user Atlassian credentials. The
+  only strict-TDD unit in this repo (`node --test`).
+- **`services/engram-monitor/`** — static dashboard (Vite/React), built
+  from a manually-cloned upstream source and served via nginx. See the
+  [compatibility caveat](#engram-monitor-compatibility-caveat-read-before-relying-on-this)
+  below — this integration is unverified.
+
+## Logging in / getting a token
+
+Admin users and tokens are managed with `bin/admin.js` inside the
+`auth-gateway` container:
+
+```bash
+# create a user (prompts for username/password if flags omitted)
+docker compose exec auth-gateway node bin/admin.js create-user --username alice
+
+# issue a Bearer token for that user — shown ONCE, copy it immediately
+docker compose exec auth-gateway node bin/admin.js issue-token --username alice
+
+# revoke a token
+docker compose exec auth-gateway node bin/admin.js revoke-token --token <token>
+```
+
+Browsers authenticate at `https://auth.{$DOMAIN}/login` (HttpOnly session
+cookie); MCP clients authenticate with `Authorization: Bearer <token>`
+issued above. Point any MCP client at, e.g., `https://{$DOMAIN}/mcp/context7`
+with only that URL and token — no other client-side configuration needed.
+
+## Environment variables
+
+Every variable is documented inline in [`.env.example`](.env.example),
+grouped by service. Copy it to `.env` (gitignored) and fill in real values;
+`docker compose` reads `.env` automatically. Highlights:
+
+| Variable | Purpose |
+|---|---|
+| `DOMAIN` | Base domain; subdomains (`auth.`, `engram.`, `monitor.`) and path prefixes (`/mcp/*`) route under it |
+| `ATLASSIAN_ENC_KEY` | AES-256-GCM key encrypting stored per-user Atlassian credentials |
+| `AUTH_GATEWAY_SESSION_SECRET` | Signs the HttpOnly session cookie issued by `POST /login` |
+| `ENGRAM_CLOUD_*`, `ENGRAM_JWT_SECRET` | `engram-cloud`'s (`engram cloud serve`) own config — team-shared memory instance |
+| `ENGRAM_CLOUD_DB_*` | Postgres credentials for `engram-cloud-db` |
+| `VITE_ENGRAM_URL` | **Build-time only.** engram-monitor's backend base URL, baked into its JS bundle by `vite build` — see the caveat below |
+
+## Engram-monitor source (manual clone)
+
+`services/engram-monitor/src/` is a manual `git clone` of
+[`egdev6/engram-monitor`](https://github.com/egdev6/engram-monitor),
+deliberately **not vendored/committed** (see the `.gitignore` entry). Run
+the clone command in step 2 above before `docker compose up --build`; the
+`engram-monitor` service's build will fail without it.
+
+## engram-monitor compatibility caveat — read before relying on this
+
+**This integration is unverified.** engram-monitor's own README and source
+(`src/config/engram.ts`) describe it as a dashboard for a plain
+`engram serve` local HTTP API (observation search/browse endpoints),
+defaulting to `http://127.0.0.1:7437`. This repo's `engram-cloud` service
+instead runs the **different** `engram cloud serve` mode (port `18080`),
+which per public docs only exposes `/health`, `/sync/pull`, `/sync/push`,
+and `/dashboard/*` — plausibly **not** the same API shape engram-monitor's
+UI calls at runtime.
+
+For this PR, `VITE_ENGRAM_URL` defaults to `http://engram-cloud:18080` as
+the only available target with an HTTP API in this compose file, but it is
+**not confirmed to work**. Smoke-test it as part of Phase 4 integration
+(`openspec/changes/gateway-foundation/tasks.md`, section 5.x). If the
+dashboard doesn't function against `engram-cloud`'s sync API, the two
+realistic follow-ups are:
+
+1. Add a dedicated `engram serve` container just for the monitor, or
+2. Accept that engram-monitor isn't usable against the team-shared cloud
+   instance and drop the `monitor.{$DOMAIN}` route.
+
+## Adding a new MCP later
+
+This repo only pilots 3 of ~20 MCPs (one per packaging style). To add
+another later, follow the pattern already used by `mcp-context7` /
+`mcp-atlassian` / `mcp-engram-tool` in `docker-compose.yml`:
+
+1. **Pick a transport.** If the server has native streamable-HTTP support
+   (like `mcp-atlassian`), run it directly. Otherwise wrap its stdio
+   command with `supergateway --stdio "<cmd>" --outputTransport
+   streamableHttp --port 9000 --host 0.0.0.0` (like `mcp-context7` /
+   `mcp-engram-tool`).
+2. **Add a compose service.** Reuse the shared `x-mcp-image` anchor at the
+   top of `docker-compose.yml` if the tool can be installed into the
+   existing shared image (`uv tool install` / `npm install --global` in
+   the `Dockerfile`); otherwise give it its own `build:` context like
+   `auth-gateway` or `engram-monitor`. Only expose the service on the
+   internal `gateway` network (`expose:`, never `ports:` — `caddy` is the
+   sole publisher).
+3. **Add a Caddy route block.** Copy an existing `handle /mcp/<name>*`
+   block: `forward_auth auth-gateway:3000 { uri /verify; import
+   strip_gateway_headers; copy_headers X-Gateway-User X-Gateway-User-Id }`
+   then `reverse_proxy <service>:9000`. Only add extra `copy_headers` /
+   `header_up` promotion (like the Atlassian PAT injection) if the new
+   MCP needs a brokered per-user secret.
+4. **Add any new secrets to `.env.example`**, documented inline.
+5. **Verify:** `docker compose config -q`, then `docker compose up -d
+   --build <service>`, then an unauthenticated request against the new
+   route (expect `401`) and an authenticated one (expect success).
+
+## Development / testing
+
+- `services/auth-gateway`: `npm test` (`node --test`), `npm run typecheck`
+  (`tsc --noEmit` over JSDoc-typed ESM), `npm run lint` (eslint), `npm run
+  format` (prettier check). See `openspec/config.yaml` for the pinned
+  toolchain.
+- Everything else (`Dockerfile`, `docker-compose.yml`, `Caddyfile`,
+  `services/engram-monitor/{Dockerfile,nginx.conf}`) is infra/config,
+  validated statically (`docker compose config -q`, `caddy validate
+  --config Caddyfile`) rather than unit-tested.
+
+## Rollback
+
+Nothing is deployed by default. `docker compose down -v` plus reverting
+the changed files restores the empty state. Per-service rollback deletes
+its compose service block and matching Caddy route — no shared state is
+touched.
