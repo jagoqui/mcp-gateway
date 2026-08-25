@@ -9,11 +9,11 @@
 | Chained PRs recommended | Yes |
 | Suggested split | PR1 → PR2a → PR2b → PR3 (refines proposal's 3-slice guess) |
 | Delivery strategy | ask-on-risk |
-| Chain strategy | pending (recommend feature-branch-chain) |
+| Chain strategy | feature-branch-chain (resolved) |
 
-Decision needed before apply: Yes
+Decision needed before apply: No — resolved: feature-branch-chain, 4 PRs
 Chained PRs recommended: Yes
-Chain strategy: pending
+Chain strategy: feature-branch-chain
 400-line budget risk: High
 
 Rationale: 19 requirements / 35 scenarios, 5 specs. auth-gateway alone (11
