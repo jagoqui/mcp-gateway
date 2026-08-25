@@ -2,9 +2,9 @@ import { test, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { openDb } from '../src/db.js';
-import { hashToken, hashPassword } from '../src/tokens.js';
+import { hashToken } from '../src/tokens.js';
 import { encrypt } from '../src/crypto.js';
-import { createSessionToken, serializeSessionCookie } from '../src/session.js';
+import { createSessionToken } from '../src/session.js';
 import { createServer } from '../src/app.js';
 
 const DOMAIN = 'test.example';
@@ -25,13 +25,13 @@ let baseUrl;
 beforeEach(async () => {
   db = openDb(':memory:');
   server = createServer(db, { domain: DOMAIN, sessionSecret: SESSION_SECRET });
-  await new Promise((resolve) => server.listen(0, resolve));
+  await new Promise((resolve) => server.listen(0, () => resolve(undefined)));
   const address = /** @type {import('node:net').AddressInfo} */ (server.address());
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
 
 afterEach(async () => {
-  await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => server.close(() => resolve(undefined)));
   db.close();
 });
 
@@ -41,20 +41,29 @@ afterEach(async () => {
 function insertUser(opts = {}) {
   const { username = 'alice', password = 'irrelevant-for-token-tests', disabled = false } = opts;
   const info = db
-    .prepare(
-      'INSERT INTO users (username, password_hash, disabled_at) VALUES (?, ?, ?)',
-    )
+    .prepare('INSERT INTO users (username, password_hash, disabled_at) VALUES (?, ?, ?)')
     .run(username, `bcrypt-placeholder-${password}`, disabled ? '2024-01-01T00:00:00Z' : null);
   return Number(info.lastInsertRowid);
 }
 
+/**
+ * @param {number} userId
+ * @param {string} rawToken
+ * @param {{ revoked?: boolean }} [opts]
+ */
 function insertToken(userId, rawToken, opts = {}) {
   const { revoked = false } = opts;
-  db.prepare(
-    'INSERT INTO tokens (user_id, token_hash, revoked_at) VALUES (?, ?, ?)',
-  ).run(userId, hashToken(rawToken), revoked ? '2024-01-01T00:00:00Z' : null);
+  db.prepare('INSERT INTO tokens (user_id, token_hash, revoked_at) VALUES (?, ?, ?)').run(
+    userId,
+    hashToken(rawToken),
+    revoked ? '2024-01-01T00:00:00Z' : null,
+  );
 }
 
+/**
+ * @param {number} userId
+ * @param {{ scheme?: string, plaintext?: string }} [opts]
+ */
 function insertAtlassianCredential(userId, opts = {}) {
   const { scheme = 'Token', plaintext = 'atlassian-pat-value' } = opts;
   db.prepare(

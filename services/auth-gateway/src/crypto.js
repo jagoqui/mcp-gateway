@@ -49,7 +49,9 @@ export function decrypt(payload) {
   const buf = Buffer.from(payload, 'base64');
   const minLength = IV_LENGTH + TAG_LENGTH;
   if (buf.length < minLength) {
-    throw new Error(`decrypt payload must decode to at least ${minLength} bytes, got ${buf.length}`);
+    throw new Error(
+      `decrypt payload must decode to at least ${minLength} bytes, got ${buf.length}`,
+    );
   }
   const iv = buf.subarray(0, IV_LENGTH);
   const tag = buf.subarray(IV_LENGTH, IV_LENGTH + TAG_LENGTH);
