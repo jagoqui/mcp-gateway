@@ -54,18 +54,18 @@ stay near budget. PR1 (image+compose+Caddy) est. ~380 lines alone.
 
 ## Phase 2b: Verify/Login/Enrollment/Admin (PR2b, strict TDD)
 
-- [ ] 3.1 RED `test/verify.test.js`: 204 valid Bearer / valid cookie; 401 absent/invalid/revoked/disabled
-- [ ] 3.2 RED `test/verify.test.js`: 302 to `auth.{$DOMAIN}/login?next=` when `Accept: text/html`
-- [ ] 3.3 RED `test/verify.test.js`: 403 Atlassian route, no enrolled credential
-- [ ] 3.4 RED (threat: header spoofing): `/verify` ignores client-supplied `X-Gateway-User`
-- [ ] 3.5 RED (threat: secret over-forward): `X-Atlassian-Authorization` omitted on `/mcp/context7` and `/mcp/atlassian/../context7`
-- [ ] 3.6 GREEN `src/verify.js`: route-scoping via `X-Forwarded-Uri`
-- [ ] 3.7 RED `test/login.test.js`: `POST /login` issues HttpOnly session cookie
-- [ ] 3.8 GREEN `POST /login` in `src/app.js`
-- [ ] 3.9 RED `test/enrollment.test.js`: `POST /me/atlassian` stores encrypted credential
-- [ ] 3.10 GREEN enrollment route
-- [ ] 3.11 `bin/admin.js`: create user, issue token (shown once), revoke token
-- [ ] 3.12 REFACTOR: mount all routes in `src/app.js`; `tsc --noEmit`; eslint/prettier
+- [x] 3.1 RED `test/verify.test.js`: 204 valid Bearer / valid cookie; 401 absent/invalid/revoked/disabled
+- [x] 3.2 RED `test/verify.test.js`: 302 to `auth.{$DOMAIN}/login?next=` when `Accept: text/html`
+- [x] 3.3 RED `test/verify.test.js`: 403 Atlassian route, no enrolled credential
+- [x] 3.4 RED (threat: header spoofing): `/verify` ignores client-supplied `X-Gateway-User`
+- [x] 3.5 RED (threat: secret over-forward): `X-Atlassian-Authorization` omitted on `/mcp/context7` and `/mcp/atlassian/../context7`
+- [x] 3.6 GREEN `src/verify.js`: route-scoping via `X-Forwarded-Uri`
+- [x] 3.7 RED `test/login.test.js`: `POST /login` issues HttpOnly session cookie
+- [x] 3.8 GREEN `POST /login` in `src/app.js`
+- [x] 3.9 RED `test/enrollment.test.js`: `POST /me/atlassian` stores encrypted credential
+- [x] 3.10 GREEN enrollment route
+- [x] 3.11 `bin/admin.js`: create user, issue token (shown once), revoke token (RED `test/admin.test.js` + GREEN, added beyond the literal task list per strict TDD hard gate)
+- [x] 3.12 REFACTOR: mount all routes in `src/app.js`; `tsc --noEmit`; eslint/prettier — plus two PR2a advisory fixes done as their own RED/GREEN pair first (crypto.js decrypt() truncated-payload check, db.js WAL+busy_timeout)
 
 ## Phase 3: Engram Stack & Docs (PR3)
 
