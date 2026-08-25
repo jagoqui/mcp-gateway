@@ -45,12 +45,12 @@ stay near budget. PR1 (image+compose+Caddy) est. ~380 lines alone.
 
 ## Phase 2a: Auth-Gateway Data/Crypto Layer (PR2a, strict TDD)
 
-- [ ] 2.1 RED `test/crypto.test.js`: AES-256-GCM round-trip via `ATLASSIAN_ENC_KEY`
-- [ ] 2.2 GREEN `src/crypto.js`
-- [ ] 2.3 RED `test/tokens.test.js`: SHA-256 hash + `timingSafeEqual`, bcrypt password verify
-- [ ] 2.4 GREEN `src/tokens.js`
-- [ ] 2.5 `src/db.js`: better-sqlite3 schema `users`, `tokens` (`UNIQUE token_hash`), `atlassian_credentials`
-- [ ] 2.6 REFACTOR: shared db helpers; `tsc --noEmit`; eslint/prettier
+- [x] 2.1 RED `test/crypto.test.js`: AES-256-GCM round-trip via `ATLASSIAN_ENC_KEY`
+- [x] 2.2 GREEN `src/crypto.js`
+- [x] 2.3 RED `test/tokens.test.js`: SHA-256 hash + `timingSafeEqual`, bcrypt password verify
+- [x] 2.4 GREEN `src/tokens.js`
+- [x] 2.5 `src/db.js`: better-sqlite3 schema `users`, `tokens` (`UNIQUE token_hash`), `atlassian_credentials` (RED `test/db.test.js` + GREEN, schema taken verbatim from design.md's exact DDL — see Deviations note in apply-progress)
+- [x] 2.6 REFACTOR: shared db helpers (`applySchema` extracted from `openDb`); `tsc --noEmit` clean; eslint/prettier clean
 
 ## Phase 2b: Verify/Login/Enrollment/Admin (PR2b, strict TDD)
 
