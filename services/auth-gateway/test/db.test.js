@@ -4,10 +4,9 @@ import { openDb } from '../src/db.js';
 
 test('openDb creates the users, tokens, and atlassian_credentials tables', () => {
   const db = openDb(':memory:');
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-    .all()
-    .map((row) => row.name);
+  const tables = /** @type {{ name: string }[]} */ (
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
+  ).map((row) => row.name);
   assert.deepEqual(tables, ['atlassian_credentials', 'tokens', 'users']);
   db.close();
 });
@@ -27,7 +26,9 @@ test('deleting a user cascades to delete their tokens (foreign keys enforced)', 
   db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('bob', 'hash');
   db.prepare('INSERT INTO tokens (user_id, token_hash) VALUES (1, ?)').run('bob-token-hash');
   db.prepare('DELETE FROM users WHERE id = 1').run();
-  const remaining = db.prepare('SELECT COUNT(*) AS n FROM tokens').get();
+  const remaining = /** @type {{ n: number }} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens').get()
+  );
   assert.equal(remaining.n, 0);
   db.close();
 });
