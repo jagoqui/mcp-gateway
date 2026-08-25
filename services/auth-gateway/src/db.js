@@ -1,0 +1,57 @@
+import Database from 'better-sqlite3';
+
+// Schema per design.md. tokens.token_hash carries a UNIQUE constraint,
+// which SQLite backs with an implicit index — that is the fast lookup path
+// GET /verify needs on every proxied request (PR2b).
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  disabled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tokens (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  label TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS atlassian_credentials (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  scheme TEXT NOT NULL,
+  ciphertext TEXT NOT NULL,
+  cloud_id TEXT,
+  updated_at TEXT NOT NULL
+);
+`;
+
+/**
+ * Applies the auth-gateway schema (idempotent, CREATE ... IF NOT EXISTS) to
+ * an already-open database handle.
+ * @param {import('better-sqlite3').Database} db
+ * @returns {void}
+ */
+export function applySchema(db) {
+  db.exec(SCHEMA);
+}
+
+/**
+ * Opens (or creates) the SQLite database at the given path and applies the
+ * schema. Pass ':memory:' for an ephemeral in-process database (tests).
+ * @param {string} filename
+ * @returns {import('better-sqlite3').Database}
+ */
+export function openDb(filename) {
+  const db = new Database(filename);
+  db.pragma('foreign_keys = ON');
+  applySchema(db);
+  return db;
+}
