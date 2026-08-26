@@ -44,12 +44,12 @@ if actual diffs run larger than estimated.
 
 ## Phase 2: Registry, Status Projection, GET /me/credentials (Unit 2, PR 2)
 
-- [ ] 2.1 RED `test/mcp-registry.test.js`: shape per entry; frozen; every compose `mcp-*` service has an entry; atlassian is the only `perUserCredentials:true`.
-- [ ] 2.2 GREEN: `src/mcp-registry.js` — frozen `MCP_REGISTRY` + `getMcp(id)`.
-- [ ] 2.3 RED `test/credential-status.test.js`: not-enrolled shape; enrolled shape; no ciphertext/plaintext key present (R8); `configured` true/false; env value never in output.
-- [ ] 2.4 GREEN: `src/credential-status.js` — `buildCredentialStatus(db,user,env)`, explicit column `SELECT`, never `SELECT *`.
-- [ ] 2.5 RED `test/enrollment.test.js` (extend): `GET /me/credentials` mixed enrolled+shared status; unauthenticated → `401`.
-- [ ] 2.6 GREEN: `src/app.js` — add `GET /me/credentials` branch calling `buildCredentialStatus`.
+- [x] 2.1 RED `test/mcp-registry.test.js`: shape per entry; frozen; every compose `mcp-*` service has an entry; atlassian is the only `perUserCredentials:true`.
+- [x] 2.2 GREEN: `src/mcp-registry.js` — frozen `MCP_REGISTRY` + `getMcp(id)`.
+- [x] 2.3 RED `test/credential-status.test.js`: not-enrolled shape; enrolled shape; no ciphertext/plaintext key present (R8); `configured` true/false; env value never in output.
+- [x] 2.4 GREEN: `src/credential-status.js` — `buildCredentialStatus(db,user,env)`, explicit column `SELECT`, never `SELECT *`.
+- [x] 2.5 RED `test/enrollment.test.js` (extend): `GET /me/credentials` mixed enrolled+shared status; unauthenticated → `401`.
+- [x] 2.6 GREEN: `src/app.js` — add `GET /me/credentials` branch calling `buildCredentialStatus`.
 
 ## Phase 3: CSRF Enforcement on POST /me/atlassian + New DELETE /me/atlassian (Unit 3, PR 3)
 

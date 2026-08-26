@@ -5,6 +5,7 @@ import { decideVerify, authenticate } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
 import { encrypt } from './crypto.js';
+import { buildCredentialStatus } from './credential-status.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -202,6 +203,41 @@ async function handleEnrollAtlassian(req, res, db, config) {
 }
 
 /**
+ * GET /me/credentials — an authenticated route (same Bearer/cookie check as
+ * /me/atlassian) that returns the caller's per-MCP credential status.
+ * Delegates the DB->response projection to buildCredentialStatus(), which
+ * enforces the credential-material disclosure limit (R8) via an explicit
+ * column SELECT.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string, sessionSecret: string }} config
+ */
+function handleCredentialStatus(req, res, db, config) {
+  const user = authenticate(
+    db,
+    { authorization: req.headers.authorization, cookie: req.headers.cookie },
+    config.sessionSecret,
+  );
+  if (!user) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  /** @type {ReturnType<typeof buildCredentialStatus>} */
+  let status;
+  try {
+    status = buildCredentialStatus(db, user);
+  } catch {
+    // Mirrors handleVerify's guard: a DB-layer failure here must never
+    // propagate as an uncaught synchronous throw and crash the process.
+    sendJson(res, 500, { error: 'internal_error' });
+    return;
+  }
+  sendJson(res, 200, status);
+}
+
+/**
  * Runs an async route handler, converting any uncaught rejection into a
  * generic 500 response instead of letting it crash the process. Shared by
  * every POST route so each handler only needs to worry about its own
@@ -255,6 +291,11 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'POST' && pathname === '/me/atlassian') {
       runAsyncHandler(handleEnrollAtlassian(req, res, db, config), res);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/me/credentials') {
+      handleCredentialStatus(req, res, db, config);
       return;
     }
 

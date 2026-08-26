@@ -121,6 +121,40 @@ test('POST /me/atlassian rejects a request missing the required token field with
   assert.equal(res.status, 400);
 });
 
+test('GET /me/credentials returns mixed enrolled + shared status for the authenticated caller', async () => {
+  const { userId, rawToken } = insertUserWithToken({ username: 'heidi' });
+  db.prepare(
+    `INSERT INTO atlassian_credentials (user_id, scheme, ciphertext, cloud_id, updated_at)
+     VALUES (?, ?, ?, ?, datetime('now'))`,
+  ).run(userId, 'Token', 'irrelevant-ciphertext-for-this-test', 'cloud-42');
+  process.env.CONTEXT7_API_KEY = 'shared-context7-secret';
+
+  const res = await fetch(`${baseUrl}/me/credentials`, {
+    headers: { Authorization: `Bearer ${rawToken}` },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+
+  const atlassian = body.mcps.find((/** @type {any} */ mcp) => mcp.id === 'atlassian');
+  assert.ok(atlassian);
+  assert.equal(atlassian.enrolled, true);
+  assert.equal(atlassian.cloudId, 'cloud-42');
+
+  const context7 = body.mcps.find((/** @type {any} */ mcp) => mcp.id === 'context7');
+  assert.ok(context7);
+  assert.equal(context7.perUserCredentials, false);
+  assert.equal(context7.configured, true);
+
+  delete process.env.CONTEXT7_API_KEY;
+});
+
+test('GET /me/credentials requires authentication (401 without a valid Bearer/cookie)', async () => {
+  const res = await fetch(`${baseUrl}/me/credentials`);
+  assert.equal(res.status, 401);
+  const body = await res.json();
+  assert.equal(body.error, 'unauthenticated');
+});
+
 test('threat: POST /me/atlassian never trusts a client-supplied user id — it always writes to the authenticated caller', async () => {
   const alice = insertUserWithToken({ username: 'alice2' });
   const bob = insertUserWithToken({ username: 'bob2' });
