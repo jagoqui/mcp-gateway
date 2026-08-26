@@ -72,10 +72,10 @@ created in this unit already wrapped by the guard (there is no unguarded interme
 
 ## Phase 5: Credentials Panel, Route Wiring, Docs (Unit 5, PR 5)
 
-- [ ] 5.1 RED `test/panel.test.js`: 200+`text/html`; unauth+html→302 `/login?next=%2Fcredentials`; unauth JSON→401; all 3 MCPs render; shared rows have no `<form>`; body has no `<script`; CSP+`no-store` headers present; hidden `csrf` field verifies for caller `uid`; malicious `cloudId` escaped (R6); unknown `?error=`→no banner (R7).
-- [ ] 5.2 GREEN: `src/panel.js` — `renderPanel`, frozen `PANEL_ERRORS` allow-list; wire `GET /credentials` in `src/app.js` (redirect-on-unauth-html, 401 JSON otherwise).
-- [ ] 5.3 RED (extend `test/panel.test.js`/`csrf-enforcement.test.js`): form `POST /me/atlassian`→302 `/credentials`; `POST /me/atlassian/delete`→302, only caller's row deleted.
-- [ ] 5.4 GREEN: `src/app.js` — add `POST /me/atlassian/delete` branch; make `POST /me/atlassian` response-mode-aware (`isForm`→302, else JSON).
-- [ ] 5.5 RED `test/verify.test.js` (extend): `enrollUrl` is `https://auth.{domain}/credentials`.
-- [ ] 5.6 GREEN: `src/verify.js` — repoint `enrollUrl`.
-- [ ] 5.7 Update `README.md`: document `/login` and `/credentials`.
+- [x] 5.1 RED `test/panel.test.js`: 200+`text/html`; unauth+html→302 `/login?next=%2Fcredentials`; unauth JSON→401; all 3 MCPs render; shared rows have no `<form>`; body has no `<script`; CSP+`no-store` headers present; hidden `csrf` field verifies for caller `uid`; malicious `cloudId` escaped (R6); unknown `?error=`→no banner (R7).
+- [x] 5.2 GREEN: `src/panel.js` — `renderPanel`, frozen `PANEL_ERRORS` allow-list; wire `GET /credentials` in `src/app.js` (redirect-on-unauth-html, 401 JSON otherwise).
+- [x] 5.3 RED (extend `test/panel.test.js`/`csrf-enforcement.test.js`): form `POST /me/atlassian`→302 `/credentials`; `POST /me/atlassian/delete`→302, only caller's row deleted.
+- [x] 5.4 GREEN: `src/app.js` — add `POST /me/atlassian/delete` branch; make `POST /me/atlassian` response-mode-aware (`isForm`→302, else JSON).
+- [x] 5.5 RED `test/verify.test.js` (extend): `enrollUrl` is `https://auth.{domain}/credentials`.
+- [x] 5.6 GREEN: `src/verify.js` — repoint `enrollUrl`.
+- [x] 5.7 Update `README.md`: document `/login` and `/credentials`.

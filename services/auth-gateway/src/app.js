@@ -1,14 +1,15 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
-import { decideVerify, authenticate, authenticateWithMethod } from './verify.js';
+import { decideVerify, authenticate, authenticateWithMethod, wantsHtml } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
 import { encrypt } from './crypto.js';
 import { buildCredentialStatus } from './credential-status.js';
-import { verifyCsrfToken, isAcceptableOrigin } from './csrf.js';
+import { verifyCsrfToken, issueCsrfToken, isAcceptableOrigin } from './csrf.js';
 import { PAGE_HEADERS } from './html.js';
 import { renderLoginPage, sanitizeNext } from './login-page.js';
+import { renderPanel } from './panel.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -275,16 +276,20 @@ function authenticateCookieWrite(req, res, db, config) {
  * body `csrf` field (form posts cannot set headers; `DELETE` has no body at
  * all, so it must use the header).
  *
- * Sends `403 csrf_token_invalid` and returns `false` on rejection; callers
+ * On rejection: a form submission (design.md "Cookie-write guard order",
+ * step 4) redirects `302 /credentials?error=csrf` — the no-JS panel has no
+ * way to show a JSON body — while every other caller gets
+ * `403 {error:'csrf_token_invalid'}`. Returns `false` on rejection; callers
  * MUST stop immediately when this returns `false`.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {{ user: any, method: 'bearer' | 'cookie' }} authResult
  * @param {{ sessionSecret: string }} config
  * @param {Record<string, any>} [bodyData]
+ * @param {boolean} [isForm]
  * @returns {boolean}
  */
-function verifyCookieWriteCsrf(req, res, authResult, config, bodyData = {}) {
+function verifyCookieWriteCsrf(req, res, authResult, config, bodyData = {}, isForm = false) {
   if (authResult.method !== 'cookie') {
     return true;
   }
@@ -295,6 +300,11 @@ function verifyCookieWriteCsrf(req, res, authResult, config, bodyData = {}) {
     sessionSecret: config.sessionSecret,
   });
   if (!csrfOk) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/credentials?error=csrf' });
+      res.end();
+      return false;
+    }
     sendJson(res, 403, { error: 'csrf_token_invalid' });
     return false;
   }
@@ -332,15 +342,27 @@ async function handleEnrollAtlassian(req, res, db, config) {
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
   }
+  const { isForm, data } = body;
 
   // 4. CSRF token check for cookie auth (header, else body 'csrf' field).
-  if (!verifyCookieWriteCsrf(req, res, authResult, config, body.data)) {
+  // A form failure redirects (design.md "Cookie-write guard order" step 4);
+  // every other caller keeps the existing JSON 403.
+  if (!verifyCookieWriteCsrf(req, res, authResult, config, data, isForm)) {
     return;
   }
 
-  // 5. Validate fields, then proceed.
-  const { token, scheme, cloudId } = body.data ?? {};
+  // 5. Validate fields, then proceed. A form validation failure also
+  // redirects rather than returning JSON — the no-JS panel has nowhere to
+  // render a JSON error body (design.md open question, accepted: the token
+  // field is never re-echoed anyway, so re-rendering submitted values isn't
+  // possible regardless).
+  const { token, scheme, cloudId } = data ?? {};
   if (typeof token !== 'string' || !token || typeof scheme !== 'string' || !scheme) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/credentials?error=invalid' });
+      res.end();
+      return;
+    }
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
   }
@@ -356,6 +378,14 @@ async function handleEnrollAtlassian(req, res, db, config) {
        updated_at = excluded.updated_at`,
   ).run(user.id, scheme, ciphertext, typeof cloudId === 'string' ? cloudId : null);
 
+  // Response mode is driven by isForm, not the Accept header (design.md
+  // "Body parsing"): the no-JS panel submits a plain form and expects a
+  // redirect back to itself; every existing JSON caller is unaffected.
+  if (isForm) {
+    res.writeHead(302, { Location: '/credentials' });
+    res.end();
+    return;
+  }
   sendJson(res, 200, { ok: true });
 }
 
@@ -400,6 +430,60 @@ async function handleDeleteAtlassian(req, res, db, config) {
 }
 
 /**
+ * POST /me/atlassian/delete — the no-JS panel's form-reachable equivalent of
+ * DELETE /me/atlassian above (design.md D4: plain `<form method="post">`
+ * cannot send a DELETE request). Runs the exact same 5-step cookie-write
+ * guard end-to-end; only the body transport (form field vs. header-only) and
+ * the success/CSRF-failure response shape (302 redirect back to the panel,
+ * not JSON) differ from DELETE /me/atlassian.
+ *
+ * Async and routed through runAsyncHandler for the same reason as
+ * handleDeleteAtlassian: a synchronous DB throw becomes a rejected promise
+ * instead of an uncaught exception that would crash the process.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string, sessionSecret: string }} config
+ */
+async function handleDeleteAtlassianForm(req, res, db, config) {
+  // 1-2. Authenticate + Origin check (cookie auth only).
+  const authResult = authenticateCookieWrite(req, res, db, config);
+  if (!authResult) {
+    return;
+  }
+  const { user } = authResult;
+
+  // 3. Parse body (form 'csrf' field; DELETE /me/atlassian above is the
+  // header-only equivalent for non-browser clients).
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  // 4. CSRF token check for cookie auth: a form failure redirects back to
+  // the panel with an error banner.
+  if (!verifyCookieWriteCsrf(req, res, authResult, config, data, isForm)) {
+    return;
+  }
+
+  // 5. Delete only the caller's own row — identity always comes from the
+  // authenticated session, never from client input.
+  db.prepare('DELETE FROM atlassian_credentials WHERE user_id = ?').run(user.id);
+
+  if (isForm) {
+    res.writeHead(302, { Location: '/credentials' });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * GET /me/credentials — an authenticated route (same Bearer/cookie check as
  * /me/atlassian) that returns the caller's per-MCP credential status.
  * Delegates the DB->response projection to buildCredentialStatus(), which
@@ -432,6 +516,57 @@ function handleCredentialStatus(req, res, db, config) {
     return;
   }
   sendJson(res, 200, status);
+}
+
+/**
+ * GET /credentials — the zero-JavaScript credential admin panel
+ * (design.md D4). Caddy's `forward_auth` normally redirects an
+ * unauthenticated browser before this route is ever reached; the in-route
+ * check below is defense-in-depth and is what makes this route testable
+ * without Caddy. An unauthenticated `Accept: text/html` request redirects
+ * *relatively* to `/login?next=%2Fcredentials` (same-origin by
+ * construction, and it works over `http://127.0.0.1:<port>` in tests) —
+ * deliberately not the absolute `https://auth.{domain}/login?...` that
+ * decideVerify() uses. Every other unauthenticated request gets a plain
+ * `401` JSON body, matching every other authenticated route in this file.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string, sessionSecret: string }} config
+ * @param {URL} url
+ */
+function handleCredentialsPanel(req, res, db, config, url) {
+  const user = authenticate(
+    db,
+    { authorization: req.headers.authorization, cookie: req.headers.cookie },
+    config.sessionSecret,
+  );
+  if (!user) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/login?next=%2Fcredentials' });
+      res.end();
+      return;
+    }
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  /** @type {ReturnType<typeof buildCredentialStatus>} */
+  let status;
+  try {
+    status = buildCredentialStatus(db, user);
+  } catch {
+    // Mirrors handleCredentialStatus's guard: a DB-layer failure here must
+    // never propagate as an uncaught synchronous throw and crash the
+    // process.
+    sendJson(res, 500, { error: 'internal_error' });
+    return;
+  }
+
+  const csrfToken = issueCsrfToken(user.id, config.sessionSecret);
+  const errorCode = url.searchParams.get('error');
+  res.writeHead(200, PAGE_HEADERS);
+  res.end(renderPanel({ status, csrfToken, errorCode }));
 }
 
 /**
@@ -501,8 +636,18 @@ export function createApp(db, appConfig = {}) {
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/me/atlassian/delete') {
+      runAsyncHandler(handleDeleteAtlassianForm(req, res, db, config), res);
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/me/credentials') {
       handleCredentialStatus(req, res, db, config);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/credentials') {
+      handleCredentialsPanel(req, res, db, config, url);
       return;
     }
 

@@ -187,6 +187,22 @@ test('GET /verify returns 403 for an authenticated user hitting an Atlassian rou
   assert.match(JSON.stringify(body), /atlassian/i);
 });
 
+// --- 5.5: enrollUrl points at the credential panel, not the old POST-only route ---
+
+test('GET /verify enrollUrl points at the /credentials panel, not the old POST-only /me/atlassian route', async () => {
+  const userId = insertUser({ username: 'olivia' });
+  insertToken(userId, 'olivias-token');
+  const res = await fetch(`${baseUrl}/verify`, {
+    headers: {
+      Authorization: 'Bearer olivias-token',
+      'X-Forwarded-Uri': '/mcp/atlassian/jira/search',
+    },
+  });
+  assert.equal(res.status, 403);
+  const body = await res.json();
+  assert.equal(body.enrollUrl, `https://auth.${DOMAIN}/credentials`);
+});
+
 test('GET /verify returns 204 with X-Atlassian-Authorization for an authenticated user with an enrolled credential on an Atlassian route', async () => {
   const userId = insertUser({ username: 'heidi' });
   insertToken(userId, 'heidis-token');

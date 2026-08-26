@@ -218,7 +218,7 @@ export function decideVerify(db, headers, config) {
         headers: {},
         body: {
           error: 'no_atlassian_credential',
-          enrollUrl: `https://auth.${domain}/me/atlassian`,
+          enrollUrl: `https://auth.${domain}/credentials`,
         },
       };
     }

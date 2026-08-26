@@ -115,9 +115,53 @@ apply_progress:
   - unit: 5
     phase: "Phase 5: Credentials Panel, Route Wiring, Docs"
     pr: "PR 5"
-    branch: pending
-    status: not_started
+    branch: feat/credential-admin-panel-05-panel
+    status: done
     tasks: [5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7]
+    commit: pending (left uncommitted for RDD review cycle)
+    notes: >
+      src/panel.js: renderPanel({status, csrfToken, errorCode}) + frozen
+      PANEL_ERRORS allow-list ({invalid, csrf}); per-user MCP rows render
+      enroll + (when enrolled) delete forms, both carrying the same
+      per-caller CSRF token; shared MCP rows render read-only (no <form>),
+      the shared secret's env var *name* looked up via getMcp() purely for
+      display, never its value. Every interpolation goes through
+      escapeHtml (R6). Unrecognized ?error= renders no banner (R7).
+      src/app.js: new GET /credentials (handleCredentialsPanel) —
+      authenticate() + wantsHtml(Accept) decides 302 /login?next=%2Fcredentials
+      vs 401 JSON when unauthenticated; buildCredentialStatus() wrapped in
+      try/catch -> 500 on DB failure (mirrors handleCredentialStatus);
+      issueCsrfToken(user.id, ...) per render. New POST /me/atlassian/delete
+      (handleDeleteAtlassianForm, async, runAsyncHandler) — the no-JS
+      panel's form-reachable equivalent of Unit 3's DELETE /me/atlassian,
+      same 5-step cookie-write guard reused end-to-end (authenticateCookieWrite
+      + verifyCookieWriteCsrf), 302 /credentials on success. Made
+      verifyCookieWriteCsrf isForm-aware: on CSRF failure a form request now
+      redirects 302 /credentials?error=csrf instead of JSON 403 (existing
+      DELETE /me/atlassian and non-form callers keep the JSON 403 — isForm
+      defaults false, so no prior behavior changed). handleEnrollAtlassian
+      (POST /me/atlassian) is now response-mode-aware end to end: isForm ->
+      302 /credentials on success, 302 /credentials?error=invalid on field
+      validation failure (design.md's accepted open-question tradeoff — the
+      token field is never re-echoed anyway), JSON 200/400 unchanged for
+      every existing non-form caller. src/verify.js: enrollUrl repointed
+      from https://auth.{domain}/me/atlassian to
+      https://auth.{domain}/credentials. README.md: new paragraph under
+      "Logging in" documenting /credentials (per-MCP forms vs read-only
+      shared rows, enrollUrl redirect, /login?next= redirect-when-logged-out,
+      CSRF scope). 16 new tests: 15 in new test/panel.test.js + 1 extended
+      in test/verify.test.js (enrollUrl); full auth-gateway suite: 148/148
+      passing (was 132 baseline before this unit), eslint clean, prettier
+      clean for every file touched by this unit (pre-existing
+      credential-status.test.js formatting drift from Unit 2 left
+      untouched, same precedent as Units 3-4), tsc baseline 23 -> 25 (+2,
+      both TS18046 'unknown' from unannotated res.json() in the two new
+      tests in panel.test.js/verify.test.js -- identical pre-existing
+      unaddressed pattern already present in 5 other test files, no new
+      error *class* introduced). Focused command from tasks.md
+      (`node --test test/panel.test.js test/verify.test.js`): 38/38
+      passing. This is the final unit (5 of 5) of credential-admin-panel;
+      all Review Workload Forecast work units are now done.
 
 deferred_notes:
   - "None blocking. Unit 3 needs authenticateWithMethod() (D2) from verify.js

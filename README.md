@@ -84,6 +84,29 @@ cookie); MCP clients authenticate with `Authorization: Bearer <token>`
 issued above. Point any MCP client at, e.g., `https://{$DOMAIN}/mcp/context7`
 with only that URL and token — no other client-side configuration needed.
 
+After logging in, each user manages their own credentials at
+`https://auth.{$DOMAIN}/credentials` — a server-rendered, zero-JavaScript
+page (plain `<form method="post">`, no build step, no client-side script)
+listing every MCP the gateway proxies to:
+
+- **Atlassian (Jira / Confluence)** is the only MCP with a per-user
+  credential form — it is the only one that reads a per-request
+  `Authorization` header. Enter your Atlassian API token there (and a
+  `cloudId` if needed) to enroll; a "Remove credential" form clears it.
+- **Context7** and **Engram** show as read-only, shared-credential rows: no
+  form, because both run as `supergateway --stdio` wrappers reading a
+  boot-time env secret with no incoming-header injection path — configured
+  once by an admin (`CONTEXT7_API_KEY`, `ENGRAM_API_KEY` in `.env`), not
+  per-user.
+
+Hitting an Atlassian route (`/mcp/atlassian/*`) with no enrolled credential
+returns `403 {"error":"no_atlassian_credential","enrollUrl":"https://auth.{$DOMAIN}/credentials"}`
+pointing straight at this page. Visiting `/credentials` while logged out
+redirects to `/login?next=%2Fcredentials`, so signing in returns you to the
+panel automatically. Cookie-authenticated writes on this page carry a
+stateless, per-session CSRF token; `Authorization: Bearer` clients (CLI/MCP)
+are unaffected — CSRF only applies to the cookie-authenticated browser path.
+
 ## Environment variables
 
 Every variable is documented inline in [`.env.example`](.env.example),
