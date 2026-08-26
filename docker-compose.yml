@@ -59,7 +59,12 @@ services:
         "--stdio", "context7-mcp",
         "--outputTransport", "streamableHttp",
         "--port", "9000",
-        "--host", "0.0.0.0"
+        "--host", "0.0.0.0",
+        # Caddy's `handle /mcp/context7*` forwards the full incoming path
+        # (no strip), so this backend must serve exactly that path, not
+        # its /mcp default — same reasoning for mcp-atlassian's --path and
+        # mcp-engram-tool's --streamableHttpPath below.
+        "--streamableHttpPath", "/mcp/context7"
       ]
     environment:
       CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}
@@ -73,7 +78,8 @@ services:
         "mcp-atlassian",
         "--transport", "streamable-http",
         "--port", "9000",
-        "--host", "0.0.0.0"
+        "--host", "0.0.0.0",
+        "--path", "/mcp/atlassian"
       ]
     environment:
       ATLASSIAN_URL: ${ATLASSIAN_URL}
@@ -94,7 +100,8 @@ services:
         "--stdio", "engram mcp",
         "--outputTransport", "streamableHttp",
         "--port", "9000",
-        "--host", "0.0.0.0"
+        "--host", "0.0.0.0",
+        "--streamableHttpPath", "/mcp/engram"
       ]
     environment:
       ENGRAM_API_KEY: ${ENGRAM_API_KEY}
