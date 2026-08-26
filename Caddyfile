@@ -1,0 +1,77 @@
+{
+	email admin@{$DOMAIN:jagoqui.tech}
+}
+
+# Every downstream hop (forward_auth and the final upstream) strips these
+# inbound headers first so a client can never spoof gateway-issued identity
+# or the brokered Atlassian credential. auth-gateway's /verify response is
+# the only legitimate source for them (see copy_headers below).
+(strip_gateway_headers) {
+	header_up -X-Gateway-User
+	header_up -X-Gateway-User-Id
+	header_up -X-Atlassian-Authorization
+}
+
+{$DOMAIN:jagoqui.tech} {
+	handle /mcp/context7* {
+		forward_auth auth-gateway:3000 {
+			uri /verify
+			import strip_gateway_headers
+			copy_headers X-Gateway-User X-Gateway-User-Id
+		}
+		reverse_proxy mcp-context7:9000
+	}
+
+	handle /mcp/atlassian* {
+		forward_auth auth-gateway:3000 {
+			uri /verify
+			import strip_gateway_headers
+			copy_headers X-Gateway-User X-Gateway-User-Id X-Atlassian-Authorization
+		}
+		reverse_proxy mcp-atlassian:9000 {
+			# Promote the per-user Atlassian credential auth-gateway emitted
+			# on /verify into the real Authorization header for this route
+			# only, then remove the intermediate header before it leaves.
+			header_up Authorization {header.X-Atlassian-Authorization}
+			header_up -X-Atlassian-Authorization
+		}
+	}
+
+	handle /mcp/engram* {
+		forward_auth auth-gateway:3000 {
+			uri /verify
+			import strip_gateway_headers
+			copy_headers X-Gateway-User X-Gateway-User-Id
+		}
+		reverse_proxy mcp-engram-tool:9000
+	}
+
+	handle {
+		respond "mcp-gateway" 200
+	}
+}
+
+auth.{$DOMAIN:jagoqui.tech} {
+	# /login and /verify are auth-gateway's own public entry points and
+	# MUST stay reachable without a prior forward_auth check.
+	handle /login* {
+		reverse_proxy auth-gateway:3000 {
+			import strip_gateway_headers
+		}
+	}
+
+	handle /verify* {
+		reverse_proxy auth-gateway:3000 {
+			import strip_gateway_headers
+		}
+	}
+
+	handle {
+		forward_auth auth-gateway:3000 {
+			uri /verify
+			import strip_gateway_headers
+			copy_headers X-Gateway-User X-Gateway-User-Id
+		}
+		reverse_proxy auth-gateway:3000
+	}
+}

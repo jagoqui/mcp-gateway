@@ -9,11 +9,11 @@
 | Chained PRs recommended | Yes |
 | Suggested split | PR1 → PR2a → PR2b → PR3 (refines proposal's 3-slice guess) |
 | Delivery strategy | ask-on-risk |
-| Chain strategy | pending (recommend feature-branch-chain) |
+| Chain strategy | feature-branch-chain (resolved) |
 
-Decision needed before apply: Yes
+Decision needed before apply: No — resolved: feature-branch-chain, 4 PRs
 Chained PRs recommended: Yes
-Chain strategy: pending
+Chain strategy: feature-branch-chain
 400-line budget risk: High
 
 Rationale: 19 requirements / 35 scenarios, 5 specs. auth-gateway alone (11
@@ -32,16 +32,16 @@ stay near budget. PR1 (image+compose+Caddy) est. ~380 lines alone.
 
 ## Phase 1: Container & Compose Foundation (PR1)
 
-- [ ] 1.1 `Dockerfile` stage `base`: node:22-bookworm-slim, tini, non-root `app`
-- [ ] 1.2 `Dockerfile` stage `artifacts`: GitHub `latest` API resolve (`ENGRAM_VERSION` ARG override), download binary + `checksums.txt`, `sha256sum -c`
-- [ ] 1.3 `Dockerfile` stage `pytools`: pinned `uv`, `uv tool install mcp-atlassian==<pin>`
-- [ ] 1.4 `Dockerfile` stage `nodetools`: pinned `supergateway`, no runtime network
-- [ ] 1.5 `Dockerfile` stage `runtime`: copy artifact trees, `tini` entrypoint, run as `app`
-- [ ] 1.6 `docker-compose.yml`: `caddy`, `auth-gateway`, `mcp-context7`, `mcp-atlassian` (`--transport streamable-http`), `mcp-engram-tool`; one bridge net; fixed `supergateway --stdio` strings; only `caddy` publishes
-- [ ] 1.7 `Caddyfile`: subdomain routes, `/login`+`/verify` excluded from `forward_auth`, strip inbound `X-Gateway-*`/`X-Atlassian-*`, `copy_headers` scoped to `/mcp/atlassian*`
-- [ ] 1.8 `.env.example`: DOMAIN, ATLASSIAN_ENC_KEY, mcp credentials
-- [ ] 1.9 `.gitignore`: `.env`, `*.sqlite`, `node_modules`, `dist`
-- [ ] 1.10 Verify: `docker compose config -q`, cold-cache `docker compose build`
+- [x] 1.1 `Dockerfile` stage `base`: node:22-bookworm-slim, tini, non-root `app`
+- [x] 1.2 `Dockerfile` stage `artifacts`: GitHub `latest` API resolve (`ENGRAM_VERSION` ARG override), download binary + `checksums.txt`, `sha256sum -c`
+- [x] 1.3 `Dockerfile` stage `pytools`: pinned `uv`, `uv tool install mcp-atlassian==<pin>`
+- [x] 1.4 `Dockerfile` stage `nodetools`: pinned `supergateway`, no runtime network
+- [x] 1.5 `Dockerfile` stage `runtime`: copy artifact trees, `tini` entrypoint, run as `app`
+- [x] 1.6 `docker-compose.yml`: `caddy`, `auth-gateway`, `mcp-context7`, `mcp-atlassian` (`--transport streamable-http`), `mcp-engram-tool`; one bridge net; fixed `supergateway --stdio` strings; only `caddy` publishes
+- [x] 1.7 `Caddyfile`: subdomain routes, `/login`+`/verify` excluded from `forward_auth`, strip inbound `X-Gateway-*`/`X-Atlassian-*`, `copy_headers` scoped to `/mcp/atlassian*`
+- [x] 1.8 `.env.example`: DOMAIN, ATLASSIAN_ENC_KEY, mcp credentials — unblocked by the user (sandbox denied `.env*` writes to the apply sub-agent and, initially, the orchestrator); file renamed from `env.example.tmp` and committed.
+- [x] 1.9 `.gitignore`: `.env`, `*.sqlite`, `node_modules`, `dist` (already present from the SDD scaffolding bootstrap commit; verified content covers all required patterns, no change needed)
+- [x] 1.10 Verify: `docker compose config -q` passed (exit 0, brew-installed `docker`+`docker-compose` CLI, no daemon required for `config`). `docker compose build` NOT run — no Docker daemon available in this sandbox (`docker info` fails to reach `/var/run/docker.sock`). Additionally validated `Caddyfile` syntax with a real `caddy validate` (brew-installed caddy 2.11.4) — not required by this task but the only available substitute for a live Caddy config check.
 
 ## Phase 2a: Auth-Gateway Data/Crypto Layer (PR2a, strict TDD)
 
