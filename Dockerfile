@@ -8,6 +8,11 @@
 ARG NODE_IMAGE=node:22-bookworm-slim
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.5.11
 
+# Named stage so `pytools` can `COPY --from=uv_source` below — BuildKit
+# doesn't support variable expansion directly in COPY --from for an image
+# reference, only for a named stage.
+FROM ${UV_IMAGE} AS uv_source
+
 # ---------------------------------------------------------------------------
 # Stage: base
 # Common OS packages and the non-root runtime user shared by every stage.
@@ -84,7 +89,7 @@ RUN set -eu; \
 FROM base AS pytools
 
 ARG MCP_ATLASSIAN_VERSION=0.11.9
-COPY --from=${UV_IMAGE} /uv /uvx /usr/local/bin/
+COPY --from=uv_source /uv /uvx /usr/local/bin/
 
 ENV UV_TOOL_DIR=/opt/uv-tools \
     UV_TOOL_BIN_DIR=/opt/uv-tools/bin \

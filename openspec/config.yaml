@@ -62,7 +62,7 @@ rules:
     test_command: "npm --prefix services/auth-gateway test"
   verify:
     test_command: "npm --prefix services/auth-gateway test"
-    build_command: "docker compose config -q"
+    build_command: "docker compose build"
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas
