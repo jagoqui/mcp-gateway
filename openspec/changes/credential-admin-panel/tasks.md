@@ -35,12 +35,12 @@ if actual diffs run larger than estimated.
 
 ## Phase 1: Shared Crypto Primitives (Unit 1, PR 1)
 
-- [ ] 1.1 RED `test/session.test.js`: `sign()`/`timingSafeCompare()` exported, correct HMAC/compare behavior (D1).
-- [ ] 1.2 GREEN: export `sign(payload, secret)`; extract+export `timingSafeCompare(a,b)` in `src/session.js`; use it in `verifySessionToken`.
-- [ ] 1.3 REFACTOR: confirm `login.test.js`/`enrollment.test.js` stay green after extraction.
-- [ ] 1.4 RED `test/csrf.test.js`: round-trip; tampered payload; tampered sig; wrong `uid`; missing `.`; non-JSON payload; expired; future-dated beyond skew; domain-separated secret (R9); `isAcceptableOrigin` matrix — match/mismatch/literal `null`/referer-only/unparseable referer/absent×strict/non-strict (R3).
-- [ ] 1.5 GREEN: implement `deriveCsrfSecret`, `issueCsrfToken`, `verifyCsrfToken` (7-step algorithm, D7 origin from `config.domain`), `isAcceptableOrigin` in `src/csrf.js`.
-- [ ] 1.6 REFACTOR: extract shared token-split/decode helper if duplicated across functions.
+- [x] 1.1 RED `test/session.test.js`: `sign()`/`timingSafeCompare()` exported, correct HMAC/compare behavior (D1).
+- [x] 1.2 GREEN: export `sign(payload, secret)`; extract+export `timingSafeCompare(a,b)` in `src/session.js`; use it in `verifySessionToken`.
+- [x] 1.3 REFACTOR: confirm `login.test.js`/`enrollment.test.js` stay green after extraction.
+- [x] 1.4 RED `test/csrf.test.js`: round-trip; tampered payload; tampered sig; wrong `uid`; missing `.`; non-JSON payload; expired; future-dated beyond skew; domain-separated secret (R9); `isAcceptableOrigin` matrix — match/mismatch/literal `null`/referer-only/unparseable referer/absent×strict/non-strict (R3).
+- [x] 1.5 GREEN: implement `deriveCsrfSecret`, `issueCsrfToken`, `verifyCsrfToken` (7-step algorithm, D7 origin from `config.domain`), `isAcceptableOrigin` in `src/csrf.js`.
+- [x] 1.6 REFACTOR: extract shared token-split/decode helper if duplicated across functions.
 
 ## Phase 2: Registry, Status Projection, GET /me/credentials (Unit 2, PR 2)
 

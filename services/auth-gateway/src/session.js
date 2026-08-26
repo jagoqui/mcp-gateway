@@ -21,8 +21,26 @@ export function getSessionSecret() {
  * @param {string} secret
  * @returns {string} base64url HMAC-SHA256 signature
  */
-function sign(payload, secret) {
+export function sign(payload, secret) {
   return crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+}
+
+/**
+ * Constant-time string comparison, length-checked first (a length mismatch
+ * is not itself compared in constant time, matching crypto.timingSafeEqual's
+ * own requirement that both buffers have the same length — but no timing
+ * signal about *content* ever leaks for equal-length inputs).
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function timingSafeCompare(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 /**
@@ -58,9 +76,7 @@ export function verifySessionToken(token, secret) {
   const payload = token.slice(0, separatorIndex);
   const signature = token.slice(separatorIndex + 1);
   const expected = sign(payload, secret);
-  const provided = Buffer.from(signature);
-  const wanted = Buffer.from(expected);
-  if (provided.length !== wanted.length || !crypto.timingSafeEqual(provided, wanted)) {
+  if (!timingSafeCompare(signature, expected)) {
     return null;
   }
   try {
