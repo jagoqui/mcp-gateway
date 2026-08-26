@@ -6,7 +6,14 @@
 
 FROM node:22-bookworm-slim AS build
 
-RUN npm install --global pnpm@9
+# git is required at install time, not for the app itself: engram-monitor's
+# `prepare` script runs `lefthook install` (a git-hooks manager) against
+# the cloned source's own .git directory (copied in below, alongside the
+# source, since services/engram-monitor/src/ is a real git clone).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global pnpm@9
 
 WORKDIR /app
 COPY src/ .
