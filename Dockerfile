@@ -33,6 +33,10 @@ RUN apt-get update \
 # Resolves the `engram` GitHub release (or ENGRAM_VERSION pin), downloads
 # the linux/<arch> asset, and verifies it against the release's
 # checksums.txt before install. Fails the build on any verification miss.
+# The release asset is a .tar.gz (CHANGELOG.md/LICENSE/README.md/engram at
+# its root), not a raw binary — must extract before install, or the
+# installed "binary" is actually gzip data and fails at runtime with
+# "exec format error".
 # ---------------------------------------------------------------------------
 FROM base AS artifacts
 
@@ -78,8 +82,16 @@ RUN set -eu; \
         exit 1; \
     fi; \
     sha256sum -c engram.sha256; \
-    install -m 0755 "${ASSET}" /out/engram; \
+    tar -xzf "${ASSET}" engram; \
+    install -m 0755 engram /out/engram; \
     rm -rf /tmp/engram-dl
+# Build-time functional check, not just a checksum: a corrupted extraction
+# or wrong-arch binary can still pass sha256sum and `tar` cleanly while
+# being unusable (this is exactly how the raw-tarball-as-binary bug above
+# slipped past verification — checksum matched, install "succeeded", and
+# only a manual runtime smoke test caught the exec format error). Fails
+# the build immediately instead of shipping a broken image.
+RUN /out/engram --help >/dev/null
 
 # ---------------------------------------------------------------------------
 # Stage: pytools
