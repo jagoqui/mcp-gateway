@@ -7,6 +7,8 @@ import { verifyPassword } from './tokens.js';
 import { encrypt } from './crypto.js';
 import { buildCredentialStatus } from './credential-status.js';
 import { verifyCsrfToken, isAcceptableOrigin } from './csrf.js';
+import { PAGE_HEADERS } from './html.js';
+import { renderLoginPage, sanitizeNext } from './login-page.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -63,42 +65,6 @@ function handleVerify(req, res, db, config) {
 
   res.writeHead(decision.status);
   res.end();
-}
-
-/**
- * Reads and parses a JSON request body, capped at MAX_REQUEST_BODY_BYTES.
- * Rejects on oversized, unreadable, or malformed-JSON input.
- * @param {import('node:http').IncomingMessage} req
- * @returns {Promise<any>}
- */
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    /** @type {Buffer[]} */
-    const chunks = [];
-    req.on('data', (chunk) => {
-      size += chunk.length;
-      if (size > MAX_REQUEST_BODY_BYTES) {
-        reject(new Error('request body too large'));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
-      if (!raw) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error('invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
 }
 
 /**
@@ -160,26 +126,76 @@ function sendJson(res, status, body) {
 }
 
 /**
+ * GET /login — serves the zero-JS login form (design.md D4). Not gated by
+ * Caddy's forward_auth (verified against Caddyfile:57-61 in design.md), so
+ * this route must render for a fully unauthenticated browser.
+ * @param {import('node:http').ServerResponse} res
+ * @param {URL} url
+ */
+function handleGetLogin(res, url) {
+  const next = url.searchParams.get('next');
+  res.writeHead(200, PAGE_HEADERS);
+  res.end(renderLoginPage({ next }));
+}
+
+/**
+ * Re-renders the login page as a failure response (design.md
+ * "Failure rendering"): same PAGE_HEADERS as GET /login, the generic error
+ * message, the submitted username preserved (escaped), and the password
+ * field always left empty — a submitted password is never echoed back.
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} status
+ * @param {{ next?: unknown, username?: unknown, error: string }} options
+ */
+function sendLoginFailure(res, status, { next, username, error }) {
+  res.writeHead(status, PAGE_HEADERS);
+  res.end(renderLoginPage({ next, error, username }));
+}
+
+/**
  * POST /login — validates username/password and, on success, issues a
  * signed HttpOnly session cookie. Case-insensitive username lookup matches
- * users.username's COLLATE NOCASE.
+ * users.username's COLLATE NOCASE. Accepts both application/json and
+ * application/x-www-form-urlencoded bodies (D4); response mode is driven
+ * by `isForm`, never by the Accept header, so every existing JSON caller
+ * keeps its exact JSON response shape.
+ *
+ * Login CSRF (R5/D5): an Origin/Referer mismatch is rejected with 403, but
+ * an absent Origin/Referer is allowed — unlike the stricter cookie-write
+ * guard, a pre-session request has no token to bind to, and CLI/curl login
+ * carries neither header.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
  * @param {{ domain: string, sessionSecret: string }} config
  */
 async function handleLogin(req, res, db, config) {
-  /** @type {any} */
+  const originOk = isAcceptableOrigin(
+    { origin: req.headers.origin, referer: req.headers.referer },
+    { domain: config.domain, strict: false },
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
   let body;
   try {
-    body = await readJsonBody(req);
+    body = await readBody(req);
   } catch {
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
   }
 
-  const { username, password } = body ?? {};
+  const { isForm, data } = body;
+  const { username, password, next } = data ?? {};
+
   if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+    if (isForm) {
+      sendLoginFailure(res, 400, { next, username, error: 'Invalid username or password.' });
+      return;
+    }
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
   }
@@ -190,12 +206,23 @@ async function handleLogin(req, res, db, config) {
   const validPassword = user ? await verifyPassword(password, user.password_hash) : false;
 
   if (!user || user.disabled_at || !validPassword) {
+    if (isForm) {
+      sendLoginFailure(res, 401, { next, username, error: 'Invalid username or password.' });
+      return;
+    }
     sendJson(res, 401, { error: 'invalid_credentials' });
     return;
   }
 
   const token = createSessionToken({ uid: user.id }, config.sessionSecret);
   res.setHeader('Set-Cookie', serializeSessionCookie(token));
+
+  if (isForm) {
+    res.writeHead(302, { Location: sanitizeNext(next) });
+    res.end();
+    return;
+  }
+
   sendJson(res, 200, { ok: true });
 }
 
@@ -451,6 +478,11 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'GET' && pathname === '/verify') {
       handleVerify(req, res, db, config);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/login') {
+      handleGetLogin(res, url);
       return;
     }
 

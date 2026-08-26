@@ -71,9 +71,46 @@ apply_progress:
   - unit: 4
     phase: "Phase 4: Login Page"
     pr: "PR 4"
-    branch: pending
-    status: not_started
+    branch: feat/credential-admin-panel-04-login-page
+    status: done
     tasks: [4.1, 4.2, 4.3, 4.4]
+    commit: pending (left uncommitted for RDD review cycle)
+    notes: >
+      src/html.js: escapeHtml (& < > " ' -> entities, null/undefined -> '',
+      R6-verified <script>-bearing value renders inert), renderDocument
+      (doctype/meta/shared inline <style> shell), PAGE_HEADERS (D4's exact
+      CSP `default-src 'none'; style-src 'unsafe-inline'; form-action
+      'self'; frame-ancestors 'none'; base-uri 'none'` + Cache-Control:
+      no-store + X-Content-Type-Options: nosniff + Content-Type text/html).
+      src/login-page.js: sanitizeNext (single-leading-slash only, rejects
+      `//`, `/\`, and non-`/`-prefixed absolute URLs like `https://evil` ->
+      default `/credentials`, R1) and renderLoginPage (zero-JS form,
+      escapes username/next/error via escapeHtml, always calls sanitizeNext
+      internally for defense-in-depth even if the caller already sanitized,
+      password field is never pre-filled). src/app.js: added handleGetLogin
+      (GET /login, unauthenticated, PAGE_HEADERS) and sendLoginFailure
+      (401/400 html re-render with generic "Invalid username or password."
+      message); handleLogin extended to check isAcceptableOrigin(strict:
+      false) first (reject-on-mismatch, allow-on-absent, D5/R5), then
+      readBody() (dual JSON/form, reused from Unit 3) instead of the
+      now-dead readJsonBody (removed); response mode driven by isForm ->
+      302 Location + fresh Set-Cookie on form success (verified no session
+      fixation: a client-supplied pre-existing cookie is ignored, the fresh
+      token is bound to the authenticated uid), JSON 200 unchanged on JSON
+      success. GET /login wired before POST /login in the dispatcher; both
+      new handlers are synchronous (no DB write, no async gap) so no
+      runAsyncHandler wrapping was needed for them specifically -- handleLogin
+      itself is unchanged from before as an async function already routed
+      through runAsyncHandler. 14 new tests: 4 in html.test.js + 10 in
+      login.test.js (6 original + 10 new = 16 total in that file). Full
+      auth-gateway suite: 131/131 passing, eslint clean, prettier clean
+      for all touched files (pre-existing credential-status.test.js
+      formatting issue from Unit 2 left untouched, same as Unit 3), tsc
+      baseline 21 -> 23 (+2, both TS18046 'unknown' from unannotated
+      res.json() in the two new Origin-check tests in login.test.js --
+      identical pre-existing unaddressed pattern already present in
+      csrf-enforcement.test.js/enrollment.test.js/credential-status.test.js/
+      mcp-registry.test.js, no new error *class* introduced).
 
   - unit: 5
     phase: "Phase 5: Credentials Panel, Route Wiring, Docs"

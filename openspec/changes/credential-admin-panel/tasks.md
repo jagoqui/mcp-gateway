@@ -65,10 +65,10 @@ created in this unit already wrapped by the guard (there is no unguarded interme
 
 ## Phase 4: Login Page (Unit 4, PR 4)
 
-- [ ] 4.1 RED `test/html.test.js`: `escapeHtml` neutralizes `& < > " '`; `null`/`undefined`→`''`; `<script>`-bearing value renders inert (R6).
-- [ ] 4.2 GREEN: `src/html.js` — `escapeHtml`, `renderDocument`, `PAGE_HEADERS` (CSP + `no-store` + `nosniff`, R10).
-- [ ] 4.3 RED `test/login.test.js` (extend): `GET /login`→200 form, no `<script>`, CSP+`no-store`+`nosniff` headers present; `next` preserved+escaped; `sanitizeNext` rejects `//evil`, `/\evil`, `https://evil`→`/credentials` (R1); form POST success→302+`Set-Cookie` (fresh, no fixation); form POST failure→401 html, generic error, username preserved, password not echoed; JSON POST behavior unchanged; cross-site Origin→403 (R5); absent Origin→200 (CLI).
-- [ ] 4.4 GREEN: `src/login-page.js` — `renderLoginPage`, `sanitizeNext`; wire `GET /login` + `POST /login` (Origin reject-on-mismatch/allow-on-absent, D5) in `src/app.js`.
+- [x] 4.1 RED `test/html.test.js`: `escapeHtml` neutralizes `& < > " '`; `null`/`undefined`→`''`; `<script>`-bearing value renders inert (R6).
+- [x] 4.2 GREEN: `src/html.js` — `escapeHtml`, `renderDocument`, `PAGE_HEADERS` (CSP + `no-store` + `nosniff`, R10).
+- [x] 4.3 RED `test/login.test.js` (extend): `GET /login`→200 form, no `<script>`, CSP+`no-store`+`nosniff` headers present; `next` preserved+escaped; `sanitizeNext` rejects `//evil`, `/\evil`, `https://evil`→`/credentials` (R1); form POST success→302+`Set-Cookie` (fresh, no fixation); form POST failure→401 html, generic error, username preserved, password not echoed; JSON POST behavior unchanged; cross-site Origin→403 (R5); absent Origin→200 (CLI).
+- [x] 4.4 GREEN: `src/login-page.js` — `renderLoginPage`, `sanitizeNext`; wire `GET /login` + `POST /login` (Origin reject-on-mismatch/allow-on-absent, D5) in `src/app.js`.
 
 ## Phase 5: Credentials Panel, Route Wiring, Docs (Unit 5, PR 5)
 
