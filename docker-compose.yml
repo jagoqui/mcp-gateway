@@ -154,20 +154,25 @@ services:
   # Caddyfile's comment and README.md's "engram-monitor backend" section
   # (its client sends no auth credentials, so it can't sit behind
   # forward_auth without breaking, and the underlying engram serve API has
-  # no auth of its own to expose publicly instead). Published on the VPS's
-  # own loopback only; reach it via an SSH tunnel of this port together
-  # with 7437 (engram serve itself, which the bundled JS calls at build-time
-  # baked-in http://127.0.0.1:7437 — see services/engram-monitor/Dockerfile).
+  # no auth of its own to expose publicly instead). Reach it via a single
+  # SSH tunnel of port 7438; nginx.conf proxies /api/* internally to the
+  # host's engram serve, keeping the browser same-origin (engram serve
+  # sends no CORS headers, so a cross-origin baseURL gets its responses
+  # blocked by the browser regardless of tunnel connectivity).
+  #
+  # network_mode: host, not the gateway bridge network: the host's engram
+  # serve binds 127.0.0.1 only (not 0.0.0.0), so no bridge-networked
+  # container — not even via host.docker.internal — can reach it. Sharing
+  # the host's own network namespace is the only way in. This also means
+  # no `ports:`/`networks:`/`expose:` here — nginx.conf listens directly
+  # on the host's port 7438 (chosen to stay clear of Caddy's 80/443).
   engram-monitor:
     build:
       context: ./services/engram-monitor
       args:
-        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-http://127.0.0.1:7437}
+        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-/api}
     restart: unless-stopped
-    networks:
-      - gateway
-    ports:
-      - "127.0.0.1:7438:80"
+    network_mode: host
 
 networks:
   gateway:

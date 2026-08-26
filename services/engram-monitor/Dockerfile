@@ -25,11 +25,13 @@ COPY src/ .
 #
 # Deliberately NOT a public URL: this dashboard has no auth mechanism of
 # its own (see README.md's "engram-monitor backend" section), so it is
-# never routed through Caddy. Defaults to the host's own `engram serve`
-# process — the plain local API this dashboard's UI actually calls — and
-# is only ever reached via an SSH tunnel to the VPS (see docker-compose.yml
-# for the loopback-only port publish).
-ARG VITE_ENGRAM_URL=http://127.0.0.1:7437
+# never routed through Caddy. Defaults to /api (relative, same-origin as
+# this page), which nginx.conf proxies internally to the host's own
+# `engram serve` process — the plain local API this dashboard's UI
+# actually calls. Same-origin avoids a CORS failure: engram serve sends
+# no Access-Control-Allow-Origin header, so a cross-origin baseURL (even
+# over a working SSH tunnel) gets its responses blocked by the browser.
+ARG VITE_ENGRAM_URL=/api
 ENV VITE_ENGRAM_URL=${VITE_ENGRAM_URL}
 
 RUN pnpm install && pnpm run build
@@ -39,4 +41,6 @@ FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 80
+# Documentation only — actual binding is network_mode: host (see
+# docker-compose.yml), EXPOSE has no effect there.
+EXPOSE 7438

@@ -130,16 +130,26 @@ entire memory store — reads and deletes both — on the public internet
 with no authentication at all. Neither is acceptable, so this repo ships
 neither: the route stays off, and access is local-only.
 
-To use it, SSH-tunnel both ports from your own machine (`engram-monitor`'s
-published `127.0.0.1:7438` and the host's own `engram serve` on
-`127.0.0.1:7437`, which the compiled JS bundle calls directly) in one
-command, then open the dashboard locally:
+To use it, SSH-tunnel `engram-monitor`'s published `127.0.0.1:7438`, then
+open the dashboard locally:
 
 ```bash
-ssh -L 7438:localhost:7438 -L 7437:localhost:7437 <you>@jagoqui.tech
+ssh -L 7438:localhost:7438 <you>@jagoqui.tech
 # then, on your machine:
 open http://localhost:7438
 ```
+
+Only one port to tunnel: the bundled JS calls `/api` (same origin as the
+page itself, not a separate `127.0.0.1:7437`), and `nginx.conf` proxies
+that internally straight to `127.0.0.1:7437` — this container runs with
+`network_mode: host` (see `docker-compose.yml`) specifically because the
+host's `engram serve` binds `127.0.0.1` only, so no bridge-networked
+container (not even via `host.docker.internal`) can reach it; sharing the
+host's own network namespace is the only way in. This proxy isn't just
+convenience — `engram serve` sends no `Access-Control-Allow-Origin`
+header, so a cross-origin `baseURL` (even over a working two-port tunnel)
+gets its responses blocked by the browser's CORS policy regardless of
+whether the TCP connection itself works.
 
 `engram-cloud` (Postgres-backed team sync + its own `/dashboard/*`) still
 runs in this stack for future multi-project cloud-sync use, but is
