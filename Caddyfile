@@ -76,24 +76,10 @@ auth.{$DOMAIN:jagoqui.tech} {
 	}
 }
 
-# UNVERIFIED compatibility: engram-cloud runs `engram cloud serve` (sync/
-# dashboard API), not the plain `engram serve` local API engram-monitor's
-# own UI was built against. See README.md's compatibility caveat and
-# services/engram-monitor/Dockerfile before relying on this route.
-engram.{$DOMAIN:jagoqui.tech} {
-	forward_auth auth-gateway:3000 {
-		uri /verify
-		import strip_gateway_headers
-		copy_headers X-Gateway-User X-Gateway-User-Id
-	}
-	reverse_proxy engram-cloud:18080
-}
-
-monitor.{$DOMAIN:jagoqui.tech} {
-	forward_auth auth-gateway:3000 {
-		uri /verify
-		import strip_gateway_headers
-		copy_headers X-Gateway-User X-Gateway-User-Id
-	}
-	reverse_proxy engram-monitor:80
-}
+# engram-monitor and the host's `engram serve` API are deliberately NOT
+# published here. engram-monitor's browser client sends no auth credentials
+# at all (see README.md's "engram-monitor backend" section), so gating its
+# API behind forward_auth would 401 every request, and exposing plain
+# `engram serve` (read + delete + import/migrate) on the public internet
+# with no auth would break this stack's single-perimeter guarantee. Access
+# both locally via an SSH tunnel instead — see the README section above.

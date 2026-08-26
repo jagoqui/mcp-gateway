@@ -13,19 +13,16 @@ COPY src/ .
 
 # engram-monitor's backend base URL (src/config/engram.ts) is read at BUILD
 # TIME via `import.meta.env.VITE_ENGRAM_URL` and baked into the compiled JS
-# bundle — it is NOT re-readable at container runtime like a normal env var.
-# Changing it requires rebuilding this image.
+# bundle that runs in the VISITOR'S OWN BROWSER — it is NOT re-readable at
+# container runtime; changing it requires rebuilding this image.
 #
-# UNVERIFIED ASSUMPTION: engram-monitor's own README/source describe it as a
-# dashboard for a plain `engram serve` local API (observation search/browse,
-# default http://127.0.0.1:7437). Our `engram-cloud` service runs the
-# DIFFERENT `engram cloud serve` mode (port 18080), which per public docs
-# only exposes /health, /sync/pull, /sync/push, /dashboard/* — not
-# necessarily the same API surface this dashboard's UI calls. We point this
-# at engram-cloud as the best available target; it must be smoke-tested in
-# Phase 4 (tasks.md 5.x). See README.md's "engram-monitor compatibility
-# caveat" section for the full explanation and fallback options.
-ARG VITE_ENGRAM_URL=http://engram-cloud:18080
+# Deliberately NOT a public URL: this dashboard has no auth mechanism of
+# its own (see README.md's "engram-monitor backend" section), so it is
+# never routed through Caddy. Defaults to the host's own `engram serve`
+# process — the plain local API this dashboard's UI actually calls — and
+# is only ever reached via an SSH tunnel to the VPS (see docker-compose.yml
+# for the loopback-only port publish).
+ARG VITE_ENGRAM_URL=http://127.0.0.1:7437
 ENV VITE_ENGRAM_URL=${VITE_ENGRAM_URL}
 
 RUN pnpm install && pnpm run build

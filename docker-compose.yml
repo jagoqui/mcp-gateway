@@ -35,7 +35,6 @@ services:
       - mcp-atlassian
       - mcp-engram-tool
       - engram-cloud
-      - engram-monitor
 
   auth-gateway:
     build:
@@ -114,11 +113,12 @@ services:
       timeout: 5s
       retries: 10
 
-  # Runs `engram cloud serve` — a DIFFERENT mode from the plain `engram serve`
-  # local API that engram-monitor (below) was built against. See
-  # services/engram-monitor/Dockerfile and README.md for the compatibility
-  # caveat. NEVER set ENGRAM_CLOUD_INSECURE_NO_AUTH here (local-dev-only,
-  # disables auth entirely) — not even as a commented example.
+  # Runs `engram cloud serve` (Postgres-backed team sync, its own built-in
+  # dashboard at /dashboard/*) — a DIFFERENT surface from the plain
+  # `engram serve` API engram-monitor (below) is wired to instead. Not
+  # routed through Caddy yet; runs internally for future team-sync use.
+  # NEVER set ENGRAM_CLOUD_INSECURE_NO_AUTH here (local-dev-only, disables
+  # auth entirely) — not even as a commented example.
   engram-cloud:
     image: ghcr.io/gentleman-programming/engram:latest
     restart: unless-stopped
@@ -138,21 +138,24 @@ services:
     expose:
       - "18080"
 
-  # UNVERIFIED compatibility: this dashboard was built for a plain
-  # `engram serve` local API, not `engram cloud serve` (see Dockerfile).
-  # Smoke-test in Phase 4 before relying on it.
+  # Deliberately NOT routed through Caddy or published publicly — see
+  # Caddyfile's comment and README.md's "engram-monitor backend" section
+  # (its client sends no auth credentials, so it can't sit behind
+  # forward_auth without breaking, and the underlying engram serve API has
+  # no auth of its own to expose publicly instead). Published on the VPS's
+  # own loopback only; reach it via an SSH tunnel of this port together
+  # with 7437 (engram serve itself, which the bundled JS calls at build-time
+  # baked-in http://127.0.0.1:7437 — see services/engram-monitor/Dockerfile).
   engram-monitor:
     build:
       context: ./services/engram-monitor
       args:
-        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-http://engram-cloud:18080}
+        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-http://127.0.0.1:7437}
     restart: unless-stopped
-    depends_on:
-      - engram-cloud
     networks:
       - gateway
-    expose:
-      - "80"
+    ports:
+      - "127.0.0.1:7438:80"
 
 networks:
   gateway:
