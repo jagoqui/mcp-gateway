@@ -151,9 +151,41 @@ header, so a cross-origin `baseURL` (even over a working two-port tunnel)
 gets its responses blocked by the browser's CORS policy regardless of
 whether the TCP connection itself works.
 
-`engram-cloud` (Postgres-backed team sync + its own `/dashboard/*`) still
-runs in this stack for future multi-project cloud-sync use, but is
-unrelated to engram-monitor and not routed through Caddy either.
+`engram-cloud` (Postgres-backed team sync + its own `/dashboard/*`) is
+unrelated to engram-monitor — see the next section.
+
+## engram-cloud (team-shared memory sync)
+
+Unlike plain `engram serve`, `engram cloud serve` has its own real
+Bearer-token auth (`ENGRAM_CLOUD_TOKEN`), so it's published directly at
+`https://engram-cloud.{$DOMAIN}` — deliberately **not** wrapped in this
+repo's `forward_auth`, since the `engram` CLI's own sync client sends a
+single `Authorization` header carrying `ENGRAM_CLOUD_TOKEN`, which
+`forward_auth` would reject as an invalid gateway token. This token is
+team-wide (one shared secret, not per-user like `/mcp/atlassian`).
+
+Each team member points their own local `engram` install at it once.
+Source the shared token from a git-ignored file (e.g.
+`~/.config/engram/env`, `chmod 600`) rather than typing it directly into
+an interactive shell, where it can land in shell history or `ps` output:
+
+```bash
+source ~/.config/engram/env   # exports ENGRAM_CLOUD_TOKEN
+engram cloud config --server https://engram-cloud.jagoqui.tech
+engram cloud enroll <name>
+engram sync --cloud --project <name>
+```
+
+Or enable background autosync instead of running `sync` by hand — same
+sourced file, plus:
+
+```bash
+export ENGRAM_CLOUD_AUTOSYNC=1
+export ENGRAM_CLOUD_SERVER=https://engram-cloud.jagoqui.tech
+```
+
+Teammates pull what others pushed with `engram sync --cloud --import
+--project <name>`.
 
 ## Adding a new MCP later
 

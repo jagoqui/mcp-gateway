@@ -83,3 +83,24 @@ auth.{$DOMAIN:jagoqui.tech} {
 # `engram serve` (read + delete + import/migrate) on the public internet
 # with no auth would break this stack's single-perimeter guarantee. Access
 # both locally via an SSH tunnel instead — see the README section above.
+
+# Unlike plain `engram serve`, `engram cloud serve` has its own real
+# Bearer-token auth (ENGRAM_CLOUD_TOKEN) — safe to expose directly. Deliberately
+# NOT wrapped in our own forward_auth: the `engram` CLI's own sync client sends
+# a single Authorization header carrying ENGRAM_CLOUD_TOKEN, which forward_auth
+# would reject as an invalid gateway token, breaking sync entirely. This is
+# team-wide (one shared token for everyone, not per-user like /mcp/atlassian).
+# Verified directly against the running container before exposing this,
+# including the real client workflow documented below (`engram cloud
+# config` / `enroll` are local-only, no server call at all — confirmed by
+# running them against a real cloud sync target with a deliberately wrong
+# token: no rejection, because nothing was sent over the wire; the actual
+# server round-trip only happens on `engram sync --cloud`, which DID
+# reject that same wrong token with "401: unauthorized: unknown token").
+# /health is open (status only, no data), /dashboard redirects to its own
+# /dashboard/login, and /sync/pull and /sync/push — the same surface the
+# real `sync --cloud` manifest-fetch call hit above — both return 401
+# without a valid token.
+engram-cloud.{$DOMAIN:jagoqui.tech} {
+	reverse_proxy engram-cloud:18080
+}
