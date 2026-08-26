@@ -100,20 +100,47 @@ function authenticateCookie(db, cookieHeader, sessionSecret) {
 
 /**
  * Authenticates a request via Authorization: Bearer <token> OR a signed
+ * session cookie, and reports WHICH mechanism actually succeeded. This must
+ * never be inferred by sniffing "does an Authorization header exist" in the
+ * caller (D2) — a request carrying a garbage Bearer header AND a valid
+ * session cookie authenticates by cookie, and must be reported as 'cookie',
+ * not 'bearer'. Reporting the wrong method here would let an attacker skip
+ * CSRF enforcement on a cookie-authenticated write simply by attaching any
+ * non-matching Authorization header (threat matrix R4).
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ authorization?: string, cookie?: string }} headers
+ * @param {string} sessionSecret
+ * @returns {{ user: any, method: 'bearer' | 'cookie' } | null}
+ */
+export function authenticateWithMethod(db, headers, sessionSecret) {
+  const bearerUser = authenticateBearer(db, headers.authorization);
+  if (bearerUser) {
+    return { user: bearerUser, method: 'bearer' };
+  }
+  const cookieUser = authenticateCookie(db, headers.cookie, sessionSecret);
+  if (cookieUser) {
+    return { user: cookieUser, method: 'cookie' };
+  }
+  return null;
+}
+
+/**
+ * Authenticates a request via Authorization: Bearer <token> OR a signed
  * session cookie — either form is equally sufficient per spec. Identity is
  * ALWAYS derived server-side from this lookup; client-supplied
  * X-Gateway-User / X-Gateway-User-Id / X-Atlassian-Authorization headers are
  * never read for this decision (threat: header spoofing).
+ *
+ * Thin wrapper over authenticateWithMethod() (D2) so decideVerify() and its
+ * existing tests are unchanged — callers that only need the user, not the
+ * auth mechanism, keep working exactly as before.
  * @param {import('better-sqlite3').Database} db
  * @param {{ authorization?: string, cookie?: string }} headers
  * @param {string} sessionSecret
  * @returns {any} the authenticated user row, or null
  */
 export function authenticate(db, headers, sessionSecret) {
-  return (
-    authenticateBearer(db, headers.authorization) ??
-    authenticateCookie(db, headers.cookie, sessionSecret)
-  );
+  return authenticateWithMethod(db, headers, sessionSecret)?.user ?? null;
 }
 
 /**

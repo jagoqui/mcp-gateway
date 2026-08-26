@@ -1,11 +1,12 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
-import { decideVerify, authenticate } from './verify.js';
+import { decideVerify, authenticate, authenticateWithMethod } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
 import { encrypt } from './crypto.js';
 import { buildCredentialStatus } from './credential-status.js';
+import { verifyCsrfToken, isAcceptableOrigin } from './csrf.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -101,6 +102,52 @@ function readJsonBody(req) {
 }
 
 /**
+ * Reads and parses a request body as either JSON or
+ * application/x-www-form-urlencoded, capped at MAX_REQUEST_BODY_BYTES (D4).
+ * `isForm` is the unambiguous browser-form signal driving response mode on
+ * write routes — a JSON API client sending an urlencoded body never happens
+ * by accident, so this flag (not the Accept header) is what must decide
+ * 200-JSON vs 302-redirect on those routes.
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {Promise<{ isForm: boolean, data: Record<string, any> }>}
+ */
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    /** @type {Buffer[]} */
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_REQUEST_BODY_BYTES) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const contentType = /** @type {string} */ (req.headers['content-type'] || '');
+      const isForm = contentType.startsWith('application/x-www-form-urlencoded');
+      if (isForm) {
+        resolve({ isForm: true, data: Object.fromEntries(new URLSearchParams(raw)) });
+        return;
+      }
+      if (!raw) {
+        resolve({ isForm: false, data: {} });
+        return;
+      }
+      try {
+        resolve({ isForm: false, data: JSON.parse(raw) });
+      } catch {
+        reject(new Error('invalid JSON body'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
  * @param {import('node:http').ServerResponse} res
  * @param {number} status
  * @param {unknown} body
@@ -153,36 +200,119 @@ async function handleLogin(req, res, db, config) {
 }
 
 /**
- * POST /me/atlassian — an authenticated route (same Bearer/cookie check as
- * /verify) that encrypts and upserts the caller's Atlassian credential.
- * Identity is always taken from the authenticated session, never from the
- * request body, so a client can never write another user's credential row.
+ * Steps 1-2 of the cookie-write CSRF guard (design.md "Cookie-write guard
+ * order"): authenticate via Bearer/cookie, reporting HOW the request
+ * authenticated (D2) rather than sniffing header presence — a garbage
+ * Bearer header alongside a valid cookie must still be treated as 'cookie'
+ * (R4), or CSRF enforcement below would be silently skippable. For cookie
+ * auth only, reject a mismatched OR absent Origin/Referer (R2/D7) BEFORE any
+ * body is read, so the cheap reject always fires first for a real
+ * cross-site attempt. Bearer auth skips the Origin check entirely — CLI
+ * callers are unaffected.
+ *
+ * Sends the 401/403 response itself and returns `null` on rejection;
+ * callers MUST stop immediately when this returns `null`.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string, sessionSecret: string }} config
+ * @returns {{ user: any, method: 'bearer' | 'cookie' } | null}
+ */
+function authenticateCookieWrite(req, res, db, config) {
+  const authResult = authenticateWithMethod(
+    db,
+    { authorization: req.headers.authorization, cookie: req.headers.cookie },
+    config.sessionSecret,
+  );
+  if (!authResult) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return null;
+  }
+  if (authResult.method === 'cookie') {
+    const originOk = isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: config.domain, strict: true },
+    );
+    if (!originOk) {
+      sendJson(res, 403, { error: 'csrf_origin_rejected' });
+      return null;
+    }
+  }
+  return authResult;
+}
+
+/**
+ * Step 4 of the cookie-write CSRF guard: verify the CSRF token, but only
+ * when auth came from the cookie — Bearer requests skip this entirely (CLI
+ * is unbroken). Token transport is the `X-CSRF-Token` header first, else a
+ * body `csrf` field (form posts cannot set headers; `DELETE` has no body at
+ * all, so it must use the header).
+ *
+ * Sends `403 csrf_token_invalid` and returns `false` on rejection; callers
+ * MUST stop immediately when this returns `false`.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {{ user: any, method: 'bearer' | 'cookie' }} authResult
+ * @param {{ sessionSecret: string }} config
+ * @param {Record<string, any>} [bodyData]
+ * @returns {boolean}
+ */
+function verifyCookieWriteCsrf(req, res, authResult, config, bodyData = {}) {
+  if (authResult.method !== 'cookie') {
+    return true;
+  }
+  const csrfToken =
+    /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? bodyData.csrf;
+  const csrfOk = verifyCsrfToken(csrfToken, {
+    uid: authResult.user.id,
+    sessionSecret: config.sessionSecret,
+  });
+  if (!csrfOk) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * POST /me/atlassian — an authenticated route that encrypts and upserts the
+ * caller's Atlassian credential. Identity is always taken from the
+ * authenticated session, never from the request body, so a client can never
+ * write another user's credential row.
+ *
+ * Cookie-authenticated requests go through the shared 5-step CSRF guard
+ * (authenticateCookieWrite + verifyCookieWriteCsrf, design.md "Cookie-write
+ * guard order"), also applied to DELETE /me/atlassian below.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
  * @param {{ domain: string, sessionSecret: string }} config
  */
 async function handleEnrollAtlassian(req, res, db, config) {
-  const user = authenticate(
-    db,
-    { authorization: req.headers.authorization, cookie: req.headers.cookie },
-    config.sessionSecret,
-  );
-  if (!user) {
-    sendJson(res, 401, { error: 'unauthenticated' });
+  // 1-2. Authenticate + Origin check (cookie auth only), before body parsing.
+  const authResult = authenticateCookieWrite(req, res, db, config);
+  if (!authResult) {
     return;
   }
+  const { user } = authResult;
 
-  /** @type {any} */
+  // 3. Parse body (form or JSON, D4).
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
   let body;
   try {
-    body = await readJsonBody(req);
+    body = await readBody(req);
   } catch {
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
   }
 
-  const { token, scheme, cloudId } = body ?? {};
+  // 4. CSRF token check for cookie auth (header, else body 'csrf' field).
+  if (!verifyCookieWriteCsrf(req, res, authResult, config, body.data)) {
+    return;
+  }
+
+  // 5. Validate fields, then proceed.
+  const { token, scheme, cloudId } = body.data ?? {};
   if (typeof token !== 'string' || !token || typeof scheme !== 'string' || !scheme) {
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
@@ -198,6 +328,46 @@ async function handleEnrollAtlassian(req, res, db, config) {
        cloud_id = excluded.cloud_id,
        updated_at = excluded.updated_at`,
   ).run(user.id, scheme, ciphertext, typeof cloudId === 'string' ? cloudId : null);
+
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * DELETE /me/atlassian — an authenticated route that clears the caller's own
+ * Atlassian credential row. Created directly with the shared CSRF guard
+ * already applied (proposal.md's In Scope list) — there is no unguarded
+ * intermediate state for this route. Has no request body: `DELETE` cannot
+ * carry a form body, so the CSRF token MUST arrive via the `X-CSRF-Token`
+ * header (enforced by verifyCookieWriteCsrf's header-first lookup).
+ *
+ * This is an async function specifically so it goes through
+ * runAsyncHandler()'s catch — a synchronous throw from the DB delete below
+ * (e.g. a corrupted database file) becomes a rejected promise instead of an
+ * uncaught synchronous exception that would crash the whole process
+ * (mirroring Unit 2's handleCredentialStatus fix and handleVerify's
+ * precedent).
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string, sessionSecret: string }} config
+ */
+async function handleDeleteAtlassian(req, res, db, config) {
+  // 1-2. Authenticate + Origin check (cookie auth only).
+  const authResult = authenticateCookieWrite(req, res, db, config);
+  if (!authResult) {
+    return;
+  }
+  const { user } = authResult;
+
+  // 4. CSRF token check for cookie auth: header transport only (no body —
+  // DELETE cannot carry a form body).
+  if (!verifyCookieWriteCsrf(req, res, authResult, config)) {
+    return;
+  }
+
+  // 5. Delete only the caller's own row — identity always comes from the
+  // authenticated session, never from client input.
+  db.prepare('DELETE FROM atlassian_credentials WHERE user_id = ?').run(user.id);
 
   sendJson(res, 200, { ok: true });
 }
@@ -291,6 +461,11 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'POST' && pathname === '/me/atlassian') {
       runAsyncHandler(handleEnrollAtlassian(req, res, db, config), res);
+      return;
+    }
+
+    if (req.method === 'DELETE' && pathname === '/me/atlassian') {
+      runAsyncHandler(handleDeleteAtlassian(req, res, db, config), res);
       return;
     }
 

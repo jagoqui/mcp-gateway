@@ -41,9 +41,32 @@ apply_progress:
   - unit: 3
     phase: "Phase 3: CSRF Enforcement + DELETE /me/atlassian"
     pr: "PR 3"
-    branch: pending
-    status: not_started
+    branch: feat/credential-admin-panel-03-csrf-enforcement
+    status: done
     tasks: [3.1, 3.2, 3.3, 3.4, 3.5]
+    commit: pending (left uncommitted for RDD review cycle)
+    notes: >
+      src/verify.js: authenticateWithMethod(db,headers,secret) reports
+      'bearer'|'cookie' (D2); authenticate() is now a thin wrapper over it —
+      garbage Bearer + valid cookie correctly resolves to 'cookie' (R4).
+      src/app.js: readBody() dual-parses JSON/x-www-form-urlencoded (64 KiB
+      cap kept); shared authenticateCookieWrite() (steps 1-2: auth +
+      strict-mode Origin check before body parsing) and
+      verifyCookieWriteCsrf() (step 4: X-CSRF-Token header, else body 'csrf'
+      field) extracted and reused by both handleEnrollAtlassian (existing
+      POST /me/atlassian, now guarded) and the new handleDeleteAtlassian
+      (DELETE /me/atlassian, created already-guarded per proposal.md — no
+      unguarded intermediate state). DELETE handler is async and routed
+      through runAsyncHandler so a synchronous DB throw becomes a rejected
+      promise instead of crashing the process (mirrors Unit 2's
+      handleCredentialStatus fix). 26 new tests: 5 in verify.test.js
+      (authenticateWithMethod) + 17 in new csrf-enforcement.test.js. Fixed a
+      pre-existing eslint gap (URLSearchParams missing from globals) needed
+      by readBody(); ran prettier --write on src/app.js only (pre-existing
+      credential-status.test.js formatting from Unit 2 left untouched — out
+      of this unit's scope). Full auth-gateway suite: 117/117 passing,
+      eslint clean, tsc baseline unchanged (21 pre-existing errors, all in
+      test files, none introduced by this unit).
 
   - unit: 4
     phase: "Phase 4: Login Page"

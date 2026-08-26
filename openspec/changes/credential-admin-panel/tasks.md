@@ -57,11 +57,11 @@ if actual diffs run larger than estimated.
 guard. `DELETE /me/atlassian` does not exist yet — per `proposal.md`'s In Scope list, it is
 created in this unit already wrapped by the guard (there is no unguarded intermediate state).
 
-- [ ] 3.1 RED `test/verify.test.js` (extend): `authenticateWithMethod` returns `'bearer'|'cookie'`; garbage Bearer + valid cookie ⇒ `'cookie'` (D2/R4); no match ⇒ `null`.
-- [ ] 3.2 GREEN: `src/verify.js` — add `authenticateWithMethod(db,headers,secret)`; `authenticate()` stays a thin wrapper.
-- [ ] 3.3 RED `test/csrf-enforcement.test.js`: cookie write no token→403 `csrf_token_invalid`; forged token→403; another user's valid token→403; valid→200; Bearer no token→200; garbage Bearer+valid cookie→403 (R4); cookie `DELETE` via `X-CSRF-Token`; cross-site Origin→403 `csrf_origin_rejected` (R2); absent Origin→403 `csrf_origin_rejected`.
-- [ ] 3.4 GREEN: `src/app.js` — `readBody()` (form/JSON dual parse, 64 KiB cap kept); apply the 5-step cookie-write guard to the existing `POST /me/atlassian` branch; add the new `DELETE /me/atlassian` branch with the same guard from creation.
-- [ ] 3.5 REFACTOR: extract the guard steps into one shared function reused by both branches.
+- [x] 3.1 RED `test/verify.test.js` (extend): `authenticateWithMethod` returns `'bearer'|'cookie'`; garbage Bearer + valid cookie ⇒ `'cookie'` (D2/R4); no match ⇒ `null`.
+- [x] 3.2 GREEN: `src/verify.js` — add `authenticateWithMethod(db,headers,secret)`; `authenticate()` stays a thin wrapper.
+- [x] 3.3 RED `test/csrf-enforcement.test.js`: cookie write no token→403 `csrf_token_invalid`; forged token→403; another user's valid token→403; valid→200; Bearer no token→200; garbage Bearer+valid cookie→403 (R4); cookie `DELETE` via `X-CSRF-Token`; cross-site Origin→403 `csrf_origin_rejected` (R2); absent Origin→403 `csrf_origin_rejected`.
+- [x] 3.4 GREEN: `src/app.js` — `readBody()` (form/JSON dual parse, 64 KiB cap kept); apply the 5-step cookie-write guard to the existing `POST /me/atlassian` branch; add the new `DELETE /me/atlassian` branch with the same guard from creation.
+- [x] 3.5 REFACTOR: extract the guard steps into one shared function reused by both branches.
 
 ## Phase 4: Login Page (Unit 4, PR 4)
 

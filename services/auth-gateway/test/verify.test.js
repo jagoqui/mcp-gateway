@@ -6,6 +6,7 @@ import { hashToken } from '../src/tokens.js';
 import { encrypt } from '../src/crypto.js';
 import { createSessionToken } from '../src/session.js';
 import { createServer } from '../src/app.js';
+import { authenticateWithMethod } from '../src/verify.js';
 
 const DOMAIN = 'test.example';
 const SESSION_SECRET = 'test-session-secret';
@@ -276,4 +277,60 @@ test('GET /verify returns a graceful 500 (not a process crash) when AUTH_GATEWAY
     unconfiguredDb.close();
     process.env.AUTH_GATEWAY_SESSION_SECRET = original;
   }
+});
+
+// --- 3.1: authenticateWithMethod reports HOW a request authenticated (D2) ---
+
+test('authenticateWithMethod returns { user, method: "bearer" } for a valid Bearer token', () => {
+  const userId = insertUser({ username: 'liam' });
+  insertToken(userId, 'liams-token');
+  const result = authenticateWithMethod(
+    db,
+    { authorization: 'Bearer liams-token' },
+    SESSION_SECRET,
+  );
+  assert.ok(result);
+  assert.equal(result.method, 'bearer');
+  assert.equal(result.user.id, userId);
+});
+
+test('authenticateWithMethod returns { user, method: "cookie" } for a valid session cookie', () => {
+  const userId = insertUser({ username: 'maya' });
+  const token = createSessionToken({ uid: userId }, SESSION_SECRET);
+  const result = authenticateWithMethod(db, { cookie: `session=${token}` }, SESSION_SECRET);
+  assert.ok(result);
+  assert.equal(result.method, 'cookie');
+  assert.equal(result.user.id, userId);
+});
+
+test('authenticateWithMethod returns null when no credential matches', () => {
+  const result = authenticateWithMethod(db, {}, SESSION_SECRET);
+  assert.equal(result, null);
+});
+
+test('authenticateWithMethod returns null when Bearer and cookie are both invalid', () => {
+  const result = authenticateWithMethod(
+    db,
+    { authorization: 'Bearer not-a-real-token', cookie: 'session=not-a-real-token.deadbeef' },
+    SESSION_SECRET,
+  );
+  assert.equal(result, null);
+});
+
+// --- D2/R4: a garbage Bearer header alongside a valid cookie must report
+// method 'cookie', never 'bearer' — sniffing on header presence alone would
+// let an attacker skip CSRF enforcement by attaching any non-matching
+// Authorization header to a cookie-authenticated request. ---
+
+test('threat: garbage Bearer header + valid cookie authenticates via cookie, not bearer (D2/R4)', () => {
+  const userId = insertUser({ username: 'nina' });
+  const token = createSessionToken({ uid: userId }, SESSION_SECRET);
+  const result = authenticateWithMethod(
+    db,
+    { authorization: 'Bearer garbage-does-not-exist', cookie: `session=${token}` },
+    SESSION_SECRET,
+  );
+  assert.ok(result);
+  assert.equal(result.method, 'cookie');
+  assert.equal(result.user.id, userId);
 });

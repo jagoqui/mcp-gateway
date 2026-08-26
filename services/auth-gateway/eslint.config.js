@@ -14,6 +14,7 @@ export default [
         console: 'readonly',
         Buffer: 'readonly',
         URL: 'readonly',
+        URLSearchParams: 'readonly',
         fetch: 'readonly',
       },
     },
