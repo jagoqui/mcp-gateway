@@ -78,6 +78,11 @@ services:
     environment:
       ATLASSIAN_URL: ${ATLASSIAN_URL}
       ATLASSIAN_OAUTH_ENABLE: "true"
+      # Explicit: mcp-atlassian's own default toolset scope changed in a
+      # recent release, so an unset TOOLSETS now warns and depends on
+      # whichever default that release ships. Pin to "all" to keep every
+      # Jira/Confluence tool available regardless of upstream defaults.
+      TOOLSETS: "all"
     expose:
       - "9000"
 

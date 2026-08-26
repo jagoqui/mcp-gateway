@@ -84,11 +84,14 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # Stage: pytools
 # uv + pinned mcp-atlassian, installed as a `uv tool` (native streamable-http
-# transport, no supergateway wrapper needed).
+# transport, no supergateway wrapper needed). 0.23.1 minimum: earlier
+# releases pin fastmcp<2.4.0 with an unbounded pydantic>=2.10.6, so `uv tool
+# install` (no lockfile) resolves today's newest pydantic and breaks fastmcp
+# at import time ("cannot specify both default and default_factory").
 # ---------------------------------------------------------------------------
 FROM base AS pytools
 
-ARG MCP_ATLASSIAN_VERSION=0.11.9
+ARG MCP_ATLASSIAN_VERSION=0.23.1
 COPY --from=uv_source /uv /uvx /usr/local/bin/
 
 ENV UV_TOOL_DIR=/opt/uv-tools \
@@ -102,11 +105,15 @@ RUN mkdir -p "${UV_TOOL_DIR}" \
 # ---------------------------------------------------------------------------
 # Stage: nodetools
 # Pinned supergateway + context7 MCP, installed at build time so wrapped
-# services need no runtime network access to fetch themselves.
+# services need no runtime network access to fetch themselves. supergateway
+# 3.x minimum: --outputTransport streamableHttp (what mcp-context7 and
+# mcp-engram-tool run under in docker-compose.yml) doesn't exist before
+# 3.x — 2.8.1's --help only lists stdio/sse/ws. Avoid 3.0.0 specifically,
+# it's missing a dist file (ERR_MODULE_NOT_FOUND on its own entrypoint).
 # ---------------------------------------------------------------------------
 FROM base AS nodetools
 
-ARG SUPERGATEWAY_VERSION=2.8.1
+ARG SUPERGATEWAY_VERSION=3.4.3
 ARG CONTEXT7_MCP_VERSION=1.0.17
 
 RUN mkdir -p /opt/node-tools \
