@@ -1,63 +1,14 @@
 #!/usr/bin/env node
-import crypto from 'node:crypto';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { openDb } from '../src/db.js';
-import { hashPassword, hashToken } from '../src/tokens.js';
+import { createUser, issueToken, revokeToken, setPassword } from '../src/user-admin.js';
 
 const DEFAULT_DB_PATH = '/data/auth-gateway.sqlite';
-const TOKEN_BYTES = 32;
 
-/**
- * Creates a user with a bcrypt-hashed password.
- * @param {import('better-sqlite3').Database} db
- * @param {{ username: string, password: string, isAdmin?: boolean }} opts
- * @returns {Promise<{ id: number, username: string }>}
- */
-export async function createUser(db, opts) {
-  const { username, password, isAdmin = false } = opts;
-  const passwordHash = await hashPassword(password);
-  const info = db
-    .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)')
-    .run(username, passwordHash, isAdmin ? 1 : 0);
-  return { id: Number(info.lastInsertRowid), username };
-}
-
-/**
- * Generates a new gateway token for a user. Only the SHA-256 hash is
- * persisted (see tokens.js) — the raw token is returned exactly once and
- * MUST be shown to the operator immediately; it is never logged or stored
- * anywhere else.
- * @param {import('better-sqlite3').Database} db
- * @param {{ userId: number, label?: string }} opts
- * @returns {{ rawToken: string }}
- */
-export function issueToken(db, opts) {
-  const { userId, label = null } = opts;
-  const rawToken = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
-  db.prepare('INSERT INTO tokens (user_id, token_hash, label) VALUES (?, ?, ?)').run(
-    userId,
-    hashToken(rawToken),
-    label,
-  );
-  return { rawToken };
-}
-
-/**
- * Revokes the token matching the given raw token value.
- * @param {import('better-sqlite3').Database} db
- * @param {{ token: string }} opts
- * @returns {boolean} true if a token was found and revoked
- */
-export function revokeToken(db, opts) {
-  const { token } = opts;
-  const result = db
-    .prepare(
-      "UPDATE tokens SET revoked_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL",
-    )
-    .run(hashToken(token));
-  return result.changes > 0;
-}
+// Delegated to src/user-admin.js (D11) — this CLI is a thin wrapper, not a
+// second implementation.
+export { createUser, issueToken, revokeToken };
 
 /**
  * @param {import('better-sqlite3').Database} db
@@ -105,7 +56,7 @@ async function prompt(question) {
   }
 }
 
-async function main() {
+export async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const flags = parseFlags(rest);
   const db = openDb(process.env.AUTH_GATEWAY_DB_PATH || DEFAULT_DB_PATH);
@@ -141,7 +92,22 @@ async function main() {
       return;
     }
 
-    console.error('Usage: admin.js <create-user|issue-token|revoke-token> [--flag value ...]');
+    if (command === 'set-password') {
+      const username = flags.username || (await prompt('Username: '));
+      const password = flags.password || (await prompt('Password: '));
+      const updated = await setPassword(db, { username, password });
+      if (!updated) {
+        console.error(`No such user: '${username}'.`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Password updated for '${username}'.`);
+      return;
+    }
+
+    console.error(
+      'Usage: admin.js <create-user|issue-token|revoke-token|set-password> [--flag value ...]',
+    );
     process.exitCode = 1;
   } finally {
     db.close();
