@@ -6,12 +6,51 @@ import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/db.js';
 
-test('openDb creates the users, tokens, and atlassian_credentials tables', () => {
+test('openDb creates the users, tokens, atlassian_credentials, and admin_audit_log tables', () => {
   const db = openDb(':memory:');
   const tables = /** @type {{ name: string }[]} */ (
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
   ).map((row) => row.name);
-  assert.deepEqual(tables, ['atlassian_credentials', 'tokens', 'users']);
+  assert.deepEqual(tables, ['admin_audit_log', 'atlassian_credentials', 'tokens', 'users']);
+  db.close();
+});
+
+test('admin_audit_log has the expected columns', () => {
+  const db = openDb(':memory:');
+  const columns = /** @type {{ name: string }[]} */ (
+    db.prepare('PRAGMA table_info(admin_audit_log)').all()
+  ).map((row) => row.name);
+  assert.deepEqual(columns, [
+    'id', 'created_at', 'actor_user_id', 'actor_label', 'action',
+    'outcome', 'target_user_id', 'target_token_id', 'detail',
+  ]);
+  db.close();
+});
+
+test('admin_audit_log.outcome CHECK constraint rejects a value outside success/failure', () => {
+  const db = openDb(':memory:');
+  assert.throws(() => {
+    db.prepare("INSERT INTO admin_audit_log (actor_label, action, outcome) VALUES ('admin', 'login', 'bogus')").run();
+  }, /CHECK constraint failed/);
+  db.close();
+});
+
+test('admin_audit_log.outcome CHECK constraint accepts success and failure', () => {
+  const db = openDb(':memory:');
+  db.prepare("INSERT INTO admin_audit_log (actor_label, action, outcome) VALUES ('admin', 'login', 'success')").run();
+  db.prepare("INSERT INTO admin_audit_log (actor_label, action, outcome) VALUES ('admin', 'login', 'failure')").run();
+  const count = /** @type {{ n: number }} */ (db.prepare('SELECT COUNT(*) AS n FROM admin_audit_log').get());
+  assert.equal(count.n, 2);
+  db.close();
+});
+
+test('admin_audit_log has idx_admin_audit_created and idx_admin_audit_target_user indexes', () => {
+  const db = openDb(':memory:');
+  const indexes = /** @type {{ name: string }[]} */ (
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'admin_audit_log' ORDER BY name").all()
+  ).map((row) => row.name);
+  assert.ok(indexes.includes('idx_admin_audit_created'));
+  assert.ok(indexes.includes('idx_admin_audit_target_user'));
   db.close();
 });
 

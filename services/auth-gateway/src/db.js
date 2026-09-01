@@ -31,6 +31,20 @@ CREATE TABLE IF NOT EXISTS atlassian_credentials (
   cloud_id TEXT,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id              INTEGER PRIMARY KEY,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  actor_user_id   INTEGER          REFERENCES users(id) ON DELETE RESTRICT,
+  actor_label     TEXT    NOT NULL,
+  action          TEXT    NOT NULL,
+  outcome         TEXT    NOT NULL CHECK (outcome IN ('success','failure')),
+  target_user_id  INTEGER          REFERENCES users(id) ON DELETE SET NULL,
+  target_token_id INTEGER,
+  detail          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_target_user ON admin_audit_log(target_user_id);
 `;
 
 /**
