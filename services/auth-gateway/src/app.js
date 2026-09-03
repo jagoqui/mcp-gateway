@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
+import { handleAdminRequest } from './admin-app.js';
 import { decideVerify, authenticate, authenticateWithMethod, wantsHtml } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
@@ -648,6 +649,16 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'GET' && pathname === '/credentials') {
       handleCredentialsPanel(req, res, db, config, url);
+      return;
+    }
+
+    // D1: one prefix branch hands the entire /admin/* namespace to its own
+    // dispatcher, keeping the two authorization models (regular
+    // Bearer/cookie above vs. admin-cookie-only below) from interleaving in
+    // this file. The boundary is the path prefix, never req.headers.host
+    // (D2) — handleAdminRequest and authenticateAdmin never read Host.
+    if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+      runAsyncHandler(handleAdminRequest(req, res, db, { domain: config.domain }), res);
       return;
     }
 
