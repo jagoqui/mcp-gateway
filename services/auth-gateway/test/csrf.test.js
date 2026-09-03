@@ -4,6 +4,8 @@ import {
   deriveCsrfSecret,
   issueCsrfToken,
   verifyCsrfToken,
+  issueAdminCsrfToken,
+  verifyAdminCsrfToken,
   isAcceptableOrigin,
 } from '../src/csrf.js';
 import { sign, createSessionToken, verifySessionToken } from '../src/session.js';
@@ -270,4 +272,49 @@ test('isAcceptableOrigin: missing headers or options object returns false, never
       false,
     );
   });
+});
+
+// --- issueAdminCsrfToken/verifyAdminCsrfToken (D5/D6, A5 domain separation) ---
+
+const ADMIN_SECRET = 'csrf-test-admin-secret';
+
+test('issueAdminCsrfToken/verifyAdminCsrfToken round-trip succeeds for the same uid+secret', () => {
+  const now = Date.now();
+  const token = issueAdminCsrfToken(UID, ADMIN_SECRET, now);
+  assert.equal(typeof token, 'string');
+  const ok = verifyAdminCsrfToken(token, { uid: UID, adminSecret: ADMIN_SECRET, now });
+  assert.equal(ok, true);
+});
+
+test('verifyAdminCsrfToken defaults maxAgeSeconds to 3600 (vs 43200 for the user token)', () => {
+  const issuedAt = Date.now();
+  const token = issueAdminCsrfToken(UID, ADMIN_SECRET, issuedAt);
+  const justUnder = verifyAdminCsrfToken(token, {
+    uid: UID,
+    adminSecret: ADMIN_SECRET,
+    now: issuedAt + 3600 * 1000,
+  });
+  const justOver = verifyAdminCsrfToken(token, {
+    uid: UID,
+    adminSecret: ADMIN_SECRET,
+    now: issuedAt + 3601 * 1000,
+  });
+  assert.equal(justUnder, true);
+  assert.equal(justOver, false);
+});
+
+test('domain separation (D5/A5): a token from issueCsrfToken (user label) fails verifyAdminCsrfToken even when both secrets are set to the exact same value', () => {
+  const sharedSecret = 'shared-secret-both-labels';
+  const now = Date.now();
+  const userToken = issueCsrfToken(UID, sharedSecret, now);
+  const ok = verifyAdminCsrfToken(userToken, { uid: UID, adminSecret: sharedSecret, now });
+  assert.equal(ok, false);
+});
+
+test('domain separation (D5/A5): a token from issueAdminCsrfToken fails verifyCsrfToken even when both secrets are set to the exact same value', () => {
+  const sharedSecret = 'shared-secret-both-labels-2';
+  const now = Date.now();
+  const adminToken = issueAdminCsrfToken(UID, sharedSecret, now);
+  const ok = verifyCsrfToken(adminToken, { uid: UID, sessionSecret: sharedSecret, now });
+  assert.equal(ok, false);
 });
