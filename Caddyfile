@@ -102,5 +102,46 @@ auth.{$DOMAIN:jagoqui.tech} {
 # real `sync --cloud` manifest-fetch call hit above — both return 401
 # without a valid token.
 engram-cloud.{$DOMAIN:jagoqui.tech} {
-	reverse_proxy engram-cloud:18080
+	reverse_proxy engram-cloud-1:18080
+}
+
+# engram-monitor is now published behind forward_auth instead of the
+# SSH-tunnel-only access described above — its own client still sends no
+# auth credentials, so gating happens entirely at this edge, in front of the
+# unauthenticated app. /engram-verify (below) is what issues the session
+# cookie forward_auth checks here; engram-hub.{$DOMAIN} (further below) is
+# where a human obtains one. reverse_proxy targets host.docker.internal
+# (see docker-compose.yml's extra_hosts on the caddy service), not a
+# gateway-network service name: engram-monitor still runs with
+# network_mode: host (its nginx now listens on 0.0.0.0:7438 instead of
+# 127.0.0.1:7438, see services/engram-monitor/nginx.conf) because the
+# host's `engram serve` it proxies to stays bound to 127.0.0.1 only.
+engram-monitor.{$DOMAIN:jagoqui.tech} {
+	forward_auth auth-gateway:3000 {
+		uri /engram-verify
+	}
+	reverse_proxy host.docker.internal:7438
+}
+
+# engram-hub is the shared-token login front door for the two dashboards
+# above: engram-monitor (gated by forward_auth /engram-verify, immediately
+# above) and engram-cloud's own dashboard (which keeps its own separate
+# login — this page only relays the typed token into it via a top-level
+# form POST, it never shares a cookie with it). /engram-verify* is
+# reverse-proxied here (not behind its own forward_auth, same reasoning as
+# auth.{$DOMAIN}'s /login*/ /verify* above: it has to be reachable by an
+# unauthenticated browser to be useful) so this same origin can POST a
+# token and receive the engram_hub_session cookie, scoped with a
+# leading-dot Domain= so engram-monitor.{$DOMAIN} accepts it too. Every
+# other path serves the static single-file front end from /srv/hub (bind
+# -mounted read-only in docker-compose.yml, mirroring how ./Caddyfile
+# itself is mounted).
+engram-hub.{$DOMAIN:jagoqui.tech} {
+	handle /engram-verify* {
+		reverse_proxy auth-gateway:3000
+	}
+	handle {
+		root * /srv/hub
+		file_server
+	}
 }
