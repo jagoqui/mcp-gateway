@@ -25,10 +25,17 @@ services:
       DOMAIN: ${DOMAIN:-jagoqui.tech}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./services/engram-hub:/srv/hub:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
       - gateway
+    # engram-monitor runs with network_mode: host (see below), not the
+    # bridge `gateway` network, so Caddy reaches it via the host's own
+    # loopback-published port through this Docker-managed hostname instead
+    # of a service name.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - auth-gateway
       - mcp-context7
@@ -44,6 +51,15 @@ services:
       DOMAIN: ${DOMAIN:-jagoqui.tech}
       ATLASSIAN_ENC_KEY: ${ATLASSIAN_ENC_KEY}
       AUTH_GATEWAY_SESSION_SECRET: ${AUTH_GATEWAY_SESSION_SECRET}
+    # ENGRAM_CLOUD_TOKEN deliberately comes via env_file, not `${ENGRAM_CLOUD_TOKEN}`
+    # substitution from this project's own .env: the engram-cloud instance actually
+    # live behind engram-cloud.{$DOMAIN} (see Caddyfile) runs from a SEPARATE compose
+    # project at ~/.engram, with its own .env and its own token — not the one below in
+    # THIS file's (unused) `engram-cloud` service. Pointing straight at that file keeps
+    # /engram-verify's comparison correct even if that token ever rotates, with no
+    # manual copy to keep in sync (and no need to touch this repo's own .env).
+    env_file:
+      - /home/jaidiver/.engram/.env
     volumes:
       - auth_gateway_data:/data
     networks:
