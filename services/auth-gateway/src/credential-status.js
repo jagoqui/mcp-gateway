@@ -64,12 +64,17 @@ export function buildCredentialStatus(db, user, env = process.env) {
       return status;
     }
 
+    // An entry with no sharedSecretEnv at all (e.g. engram) has nothing to
+    // configure — it is always "configured" by construction, not gated on
+    // an env var that doesn't exist.
+    const configured = entry.sharedSecretEnv ? Boolean(env[entry.sharedSecretEnv]) : true;
+
     /** @type {SharedStatus} */
     const status = {
       id: entry.id,
       label: entry.label,
       perUserCredentials: false,
-      configured: Boolean(env[/** @type {string} */ (entry.sharedSecretEnv)]),
+      configured,
       note: /** @type {string} */ (entry.note),
     };
     return status;

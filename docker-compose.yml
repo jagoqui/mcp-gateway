@@ -33,7 +33,7 @@ services:
       - auth-gateway
       - mcp-context7
       - mcp-atlassian
-      - mcp-engram-tool
+      - engram-router
       - engram-cloud
 
   auth-gateway:
@@ -92,21 +92,42 @@ services:
     expose:
       - "9000"
 
-  mcp-engram-tool:
-    <<: *mcp-image
-    command:
-      [
-        "supergateway",
-        "--stdio", "engram mcp",
-        "--outputTransport", "streamableHttp",
-        "--port", "9000",
-        "--host", "0.0.0.0",
-        "--streamableHttpPath", "/mcp/engram"
-      ]
+  # Per-identity Streamable HTTP MCP router — replaces the old single-project
+  # mcp-engram-tool (retired). One supergateway-wrapped `engram mcp` child is
+  # spawned per authenticated gateway identity, each with its own
+  # ENGRAM_PROJECT and cloud autosync scoped to the engram-cloud service
+  # below. See openspec/changes/engram-remote-mcp/design.md.
+  engram-router:
+    build:
+      context: ./services/engram-router
+      args:
+        ENGRAM_VERSION: ${ENGRAM_VERSION:-}
+    restart: unless-stopped
     environment:
-      ENGRAM_API_KEY: ${ENGRAM_API_KEY}
+      PORT: "9000"
+      # Legacy wildcard token (ENGRAM_CLOUD_ALLOWED_PROJECTS=*), not a
+      # managed principal token — deliberate, see design.md's Approach:
+      # only the legacy model accepts sync for a project it has never seen
+      # before, which per-identity auto-provisioning depends on.
+      ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN}
+      ENGRAM_CLOUD_SERVER: http://engram-cloud:18080
+      MAX_ENGRAM_CHILDREN: ${MAX_ENGRAM_CHILDREN:-20}
+      ENGRAM_ROUTER_PORT_BASE: "19100"
+    networks:
+      - gateway
+    depends_on:
+      - engram-cloud
     expose:
       - "9000"
+    volumes:
+      # engram defaults to ~/.engram/engram.db for its LOCAL SQLite store —
+      # one file shared by every spawned identity's child (rows scoped by
+      # the `project` column), and critically the home of
+      # `sync_enrolled_projects`, the one-time enrollment state
+      # `engram cloud enroll` writes (process-manager.js's enrollProject).
+      # Without this volume, a plain image rebuild wipes every project's
+      # enrollment AND its not-yet-synced local memory, silently.
+      - engram_router_data:/home/app/.engram
 
   engram-cloud-db:
     image: postgres:16-alpine
@@ -128,7 +149,13 @@ services:
   # Runs `engram cloud serve` (Postgres-backed team sync, its own built-in
   # dashboard at /dashboard/*) — a DIFFERENT surface from the plain
   # `engram serve` API engram-monitor (below) is wired to instead. Not
-  # routed through Caddy yet; runs internally for future team-sync use.
+  # routed through Caddy — reached only internally, by engram-router's
+  # per-identity children pushing autosync writes here (see
+  # openspec/changes/engram-remote-mcp). ENGRAM_CLOUD_ALLOWED_PROJECTS
+  # MUST stay "*" for that to work: engram-router's whole point is
+  # onboarding a never-before-seen project with zero admin action, which
+  # only the legacy wildcard model supports (managed tokens are
+  # deny-by-default with no wildcard).
   # NEVER set ENGRAM_CLOUD_INSECURE_NO_AUTH here (local-dev-only, disables
   # auth entirely) — not even as a commented example.
   engram-cloud:
@@ -147,6 +174,14 @@ services:
         condition: service_healthy
     networks:
       - gateway
+    # Loopback-only, for the operator to inspect this instance's dashboard
+    # via SSH tunnel — same pattern as ~/.engram's own "cloud" service (a
+    # SEPARATE, unrelated instance/database also on 18080, so tunnel one at
+    # a time or map this one to a different local port). Never bound wider
+    # than 127.0.0.1: no auth-gateway forward_auth in front of this port,
+    # only engram-cloud's own token check.
+    ports:
+      - "127.0.0.1:18081:18080"
     expose:
       - "18080"
 
@@ -183,3 +218,4 @@ volumes:
   caddy_config:
   auth_gateway_data:
   engram_cloud_db_data:
+  engram_router_data:

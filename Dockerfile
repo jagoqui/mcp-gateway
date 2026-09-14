@@ -118,9 +118,10 @@ RUN mkdir -p "${UV_TOOL_DIR}" \
 # Stage: nodetools
 # Pinned supergateway + context7 MCP, installed at build time so wrapped
 # services need no runtime network access to fetch themselves. supergateway
-# 3.x minimum: --outputTransport streamableHttp (what mcp-context7 and
-# mcp-engram-tool run under in docker-compose.yml) doesn't exist before
-# 3.x — 2.8.1's --help only lists stdio/sse/ws. Avoid 3.0.0 specifically,
+# 3.x minimum: --outputTransport streamableHttp (what mcp-context7 runs
+# under in docker-compose.yml, same as services/engram-router's own
+# separate Dockerfile) doesn't exist before 3.x — 2.8.1's --help only
+# lists stdio/sse/ws. Avoid 3.0.0 specifically,
 # it's missing a dist file (ERR_MODULE_NOT_FOUND on its own entrypoint).
 # ---------------------------------------------------------------------------
 FROM base AS nodetools

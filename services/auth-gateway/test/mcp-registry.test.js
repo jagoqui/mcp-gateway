@@ -31,20 +31,38 @@ test('every registry entry has the shared base shape', () => {
     assert.equal(typeof entry.route, 'string');
     assert.ok(entry.route.startsWith('/mcp/'));
     assert.equal(typeof entry.composeService, 'string');
-    assert.ok(entry.composeService.startsWith('mcp-'));
+    assert.ok(entry.composeService.length > 0);
     assert.equal(typeof entry.perUserCredentials, 'boolean');
   }
 });
 
-test('a perUserCredentials:false entry carries sharedSecretEnv and note, never a false-shaped per-user entry', () => {
+test('every perUserCredentials:false entry has a non-empty note', () => {
   const sharedEntries = MCP_REGISTRY.filter((entry) => entry.perUserCredentials === false);
-  assert.ok(sharedEntries.length > 0, 'expected at least one shared-credential entry');
+  assert.ok(sharedEntries.length > 0, 'expected at least one shared/no-credential entry');
   for (const entry of sharedEntries) {
-    assert.equal(typeof entry.sharedSecretEnv, 'string');
-    assert.ok(entry.sharedSecretEnv.length > 0);
     assert.equal(typeof entry.note, 'string');
     assert.ok(entry.note.length > 0);
   }
+});
+
+test('a shared entry with sharedSecretEnv declares it as a non-empty string when present', () => {
+  // sharedSecretEnv is optional on a perUserCredentials:false entry — not
+  // every such entry has an actual credential to configure (e.g. engram,
+  // which is isolated per-identity automatically, has none). Entries that
+  // DO declare one must declare it properly.
+  for (const entry of MCP_REGISTRY) {
+    if (entry.perUserCredentials === false && 'sharedSecretEnv' in entry) {
+      assert.equal(typeof entry.sharedSecretEnv, 'string');
+      assert.ok(entry.sharedSecretEnv.length > 0);
+    }
+  }
+});
+
+test('engram has no sharedSecretEnv — it is isolated per-identity, not shared', () => {
+  const engram = getMcp('engram');
+  assert.ok(engram);
+  assert.equal(engram.perUserCredentials, false);
+  assert.equal('sharedSecretEnv' in engram, false);
 });
 
 test('atlassian is the only perUserCredentials:true entry', () => {

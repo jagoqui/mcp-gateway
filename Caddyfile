@@ -43,7 +43,10 @@
 			import strip_gateway_headers
 			copy_headers X-Gateway-User X-Gateway-User-Id
 		}
-		reverse_proxy mcp-engram-tool:9000
+		# engram-router derives its Engram Cloud project ONLY from
+		# X-Gateway-User (copied above) — never from anything else in the
+		# request. See openspec/changes/engram-remote-mcp.
+		reverse_proxy engram-router:9000
 	}
 
 	handle {

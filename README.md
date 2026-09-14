@@ -45,19 +45,25 @@ runtime image under a different command per MCP.
 client ──Authorization: Bearer <token>──▶ Caddy :443
                                            │ forward_auth → auth-gateway:3000 /verify
                                            ▼
-                          mcp-context7 / mcp-atlassian / mcp-engram-tool
+                          mcp-context7 / mcp-atlassian / engram-router
 ```
 
 - **`Dockerfile`** — one multi-stage image (Node 22 + `uv` + `supergateway`
   + the `engram` binary). `docker-compose.yml` runs it under a different
-  `command:` per pilot MCP (`mcp-context7`, `mcp-atlassian`,
-  `mcp-engram-tool`).
+  `command:` per pilot MCP (`mcp-context7`, `mcp-atlassian`).
+  `engram-router` (below) has its own separate Dockerfile — it ships real
+  application source, not just a fixed CLI invocation.
 - **`Caddyfile`** — the only published surface. Every route except
   `auth.{$DOMAIN}/login` and `/verify` requires a passing `forward_auth`
   call to `auth-gateway`.
 - **`services/auth-gateway/`** — Express app: issues/validates Bearer
   tokens and session cookies, brokers per-user Atlassian credentials. The
   only strict-TDD unit in this repo (`node --test`).
+- **`services/engram-router/`** — per-identity Streamable HTTP MCP bridge:
+  spawns one `supergateway`-wrapped `engram mcp` child per authenticated
+  gateway user (identity from `X-Gateway-User`, never client-supplied),
+  each autosyncing to `engram-cloud`. See
+  `openspec/changes/engram-remote-mcp/design.md`.
 - **`services/engram-monitor/`** — static dashboard (Vite/React), built
   from a manually-cloned upstream source and served via nginx. Local-only,
   reached through an SSH tunnel — see [engram-monitor
@@ -93,11 +99,15 @@ listing every MCP the gateway proxies to:
   credential form — it is the only one that reads a per-request
   `Authorization` header. Enter your Atlassian API token there (and a
   `cloudId` if needed) to enroll; a "Remove credential" form clears it.
-- **Context7** and **Engram** show as read-only, shared-credential rows: no
-  form, because both run as `supergateway --stdio` wrappers reading a
-  boot-time env secret with no incoming-header injection path — configured
-  once by an admin (`CONTEXT7_API_KEY`, `ENGRAM_API_KEY` in `.env`), not
-  per-user.
+- **Context7** shows as a read-only, shared-credential row: no form, because
+  it runs as a `supergateway --stdio` wrapper reading a boot-time env
+  secret (`CONTEXT7_API_KEY` in `.env`) with no incoming-header injection
+  path — configured once by an admin, not per-user.
+- **Engram** also shows as a read-only row, but for the opposite reason:
+  there is no credential to configure at all. Every gateway user gets
+  their own isolated Engram Cloud project automatically, derived from
+  their gateway identity (`X-Gateway-User`) by `engram-router` — see
+  `services/engram-router/`.
 
 Hitting an Atlassian route (`/mcp/atlassian/*`) with no enrolled credential
 returns `403 {"error":"no_atlassian_credential","enrollUrl":"https://auth.{$DOMAIN}/credentials"}`
@@ -214,13 +224,16 @@ Teammates pull what others pushed with `engram sync --cloud --import
 
 This repo only pilots 3 of ~20 MCPs (one per packaging style). To add
 another later, follow the pattern already used by `mcp-context7` /
-`mcp-atlassian` / `mcp-engram-tool` in `docker-compose.yml`:
+`mcp-atlassian` in `docker-compose.yml`:
 
 1. **Pick a transport.** If the server has native streamable-HTTP support
    (like `mcp-atlassian`), run it directly. Otherwise wrap its stdio
    command with `supergateway --stdio "<cmd>" --outputTransport
-   streamableHttp --port 9000 --host 0.0.0.0` (like `mcp-context7` /
-   `mcp-engram-tool`).
+   streamableHttp --port 9000 --host 0.0.0.0` (like `mcp-context7`). If the
+   bridge itself needs real application logic (per-identity routing,
+   process lifecycle, anything beyond one fixed CLI invocation), it
+   probably needs its own Dockerfile instead of the shared `x-mcp-image`
+   anchor — see `services/engram-router/` for that shape.
 2. **Add a compose service.** Reuse the shared `x-mcp-image` anchor at the
    top of `docker-compose.yml` if the tool can be installed into the
    existing shared image (`uv tool install` / `npm install --global` in

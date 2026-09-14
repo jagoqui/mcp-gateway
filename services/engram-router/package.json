@@ -1,0 +1,22 @@
+{
+  "name": "engram-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-identity MCP Streamable HTTP router in front of supergateway-wrapped engram mcp children, one per authenticated gateway user.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --check ."
+  },
+  "devDependencies": {
+    "@types/node": "26.3.0",
+    "eslint": "^10.9.1",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
+  }
+}

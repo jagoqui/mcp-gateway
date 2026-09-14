@@ -85,9 +85,13 @@ test('R8: buildCredentialStatus never exposes a ciphertext or plaintext key, for
 
 test('buildCredentialStatus reports configured:true for a shared MCP when its env var is set', () => {
   const userId = insertUser({ username: 'erin' });
-  const status = buildCredentialStatus(db, { id: userId, username: 'erin' }, {
-    CONTEXT7_API_KEY: 'super-secret-shared-key',
-  });
+  const status = buildCredentialStatus(
+    db,
+    { id: userId, username: 'erin' },
+    {
+      CONTEXT7_API_KEY: 'super-secret-shared-key',
+    },
+  );
 
   const context7 = status.mcps.find((mcp) => mcp.id === 'context7');
   assert.ok(context7);
@@ -105,13 +109,28 @@ test('buildCredentialStatus reports configured:false for a shared MCP when its e
   assert.equal(context7.configured, false);
 });
 
+test('engram reports configured:true unconditionally — nothing to configure', () => {
+  const userId = insertUser({ username: 'heidi' });
+  const status = buildCredentialStatus(db, { id: userId, username: 'heidi' }, {});
+
+  const engram = status.mcps.find((mcp) => mcp.id === 'engram');
+  assert.ok(engram);
+  assert.equal(engram.perUserCredentials, false);
+  assert.equal(engram.configured, true);
+  assert.equal(typeof engram.note, 'string');
+});
+
 test('the shared secret env value itself never appears anywhere in the status output', () => {
   const userId = insertUser({ username: 'grace' });
   const secretValue = 'the-actual-context7-api-key-value';
-  const status = buildCredentialStatus(db, { id: userId, username: 'grace' }, {
-    CONTEXT7_API_KEY: secretValue,
-    ENGRAM_API_KEY: 'the-actual-engram-key-value',
-  });
+  const status = buildCredentialStatus(
+    db,
+    { id: userId, username: 'grace' },
+    {
+      CONTEXT7_API_KEY: secretValue,
+      ENGRAM_API_KEY: 'the-actual-engram-key-value',
+    },
+  );
 
   assert.ok(!JSON.stringify(status).includes(secretValue));
   assert.ok(!JSON.stringify(status).includes('the-actual-engram-key-value'));
