@@ -35,7 +35,6 @@ services:
       - mcp-atlassian
       - mcp-engram-tool
       - engram-cloud
-      - engram-monitor
 
   auth-gateway:
     build:
@@ -60,7 +59,12 @@ services:
         "--stdio", "context7-mcp",
         "--outputTransport", "streamableHttp",
         "--port", "9000",
-        "--host", "0.0.0.0"
+        "--host", "0.0.0.0",
+        # Caddy's `handle /mcp/context7*` forwards the full incoming path
+        # (no strip), so this backend must serve exactly that path, not
+        # its /mcp default — same reasoning for mcp-atlassian's --path and
+        # mcp-engram-tool's --streamableHttpPath below.
+        "--streamableHttpPath", "/mcp/context7"
       ]
     environment:
       CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}
@@ -74,11 +78,17 @@ services:
         "mcp-atlassian",
         "--transport", "streamable-http",
         "--port", "9000",
-        "--host", "0.0.0.0"
+        "--host", "0.0.0.0",
+        "--path", "/mcp/atlassian"
       ]
     environment:
       ATLASSIAN_URL: ${ATLASSIAN_URL}
       ATLASSIAN_OAUTH_ENABLE: "true"
+      # Explicit: mcp-atlassian's own default toolset scope changed in a
+      # recent release, so an unset TOOLSETS now warns and depends on
+      # whichever default that release ships. Pin to "all" to keep every
+      # Jira/Confluence tool available regardless of upstream defaults.
+      TOOLSETS: "all"
     expose:
       - "9000"
 
@@ -90,7 +100,8 @@ services:
         "--stdio", "engram mcp",
         "--outputTransport", "streamableHttp",
         "--port", "9000",
-        "--host", "0.0.0.0"
+        "--host", "0.0.0.0",
+        "--streamableHttpPath", "/mcp/engram"
       ]
     environment:
       ENGRAM_API_KEY: ${ENGRAM_API_KEY}
@@ -114,11 +125,12 @@ services:
       timeout: 5s
       retries: 10
 
-  # Runs `engram cloud serve` — a DIFFERENT mode from the plain `engram serve`
-  # local API that engram-monitor (below) was built against. See
-  # services/engram-monitor/Dockerfile and README.md for the compatibility
-  # caveat. NEVER set ENGRAM_CLOUD_INSECURE_NO_AUTH here (local-dev-only,
-  # disables auth entirely) — not even as a commented example.
+  # Runs `engram cloud serve` (Postgres-backed team sync, its own built-in
+  # dashboard at /dashboard/*) — a DIFFERENT surface from the plain
+  # `engram serve` API engram-monitor (below) is wired to instead. Not
+  # routed through Caddy yet; runs internally for future team-sync use.
+  # NEVER set ENGRAM_CLOUD_INSECURE_NO_AUTH here (local-dev-only, disables
+  # auth entirely) — not even as a commented example.
   engram-cloud:
     image: ghcr.io/gentleman-programming/engram:latest
     restart: unless-stopped
@@ -138,21 +150,29 @@ services:
     expose:
       - "18080"
 
-  # UNVERIFIED compatibility: this dashboard was built for a plain
-  # `engram serve` local API, not `engram cloud serve` (see Dockerfile).
-  # Smoke-test in Phase 4 before relying on it.
+  # Deliberately NOT routed through Caddy or published publicly — see
+  # Caddyfile's comment and README.md's "engram-monitor backend" section
+  # (its client sends no auth credentials, so it can't sit behind
+  # forward_auth without breaking, and the underlying engram serve API has
+  # no auth of its own to expose publicly instead). Reach it via a single
+  # SSH tunnel of port 7438; nginx.conf proxies /api/* internally to the
+  # host's engram serve, keeping the browser same-origin (engram serve
+  # sends no CORS headers, so a cross-origin baseURL gets its responses
+  # blocked by the browser regardless of tunnel connectivity).
+  #
+  # network_mode: host, not the gateway bridge network: the host's engram
+  # serve binds 127.0.0.1 only (not 0.0.0.0), so no bridge-networked
+  # container — not even via host.docker.internal — can reach it. Sharing
+  # the host's own network namespace is the only way in. This also means
+  # no `ports:`/`networks:`/`expose:` here — nginx.conf listens directly
+  # on the host's port 7438 (chosen to stay clear of Caddy's 80/443).
   engram-monitor:
     build:
       context: ./services/engram-monitor
       args:
-        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-http://engram-cloud:18080}
+        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-/api}
     restart: unless-stopped
-    depends_on:
-      - engram-cloud
-    networks:
-      - gateway
-    expose:
-      - "80"
+    network_mode: host
 
 networks:
   gateway:

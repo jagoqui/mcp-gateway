@@ -59,9 +59,9 @@ client ──Authorization: Bearer <token>──▶ Caddy :443
   tokens and session cookies, brokers per-user Atlassian credentials. The
   only strict-TDD unit in this repo (`node --test`).
 - **`services/engram-monitor/`** — static dashboard (Vite/React), built
-  from a manually-cloned upstream source and served via nginx. See the
-  [compatibility caveat](#engram-monitor-compatibility-caveat-read-before-relying-on-this)
-  below — this integration is unverified.
+  from a manually-cloned upstream source and served via nginx. Local-only,
+  reached through an SSH tunnel — see [engram-monitor
+  backend](#engram-monitor-backend) below for why.
 
 ## Logging in / getting a token
 
@@ -92,12 +92,12 @@ grouped by service. Copy it to `.env` (gitignored) and fill in real values;
 
 | Variable | Purpose |
 |---|---|
-| `DOMAIN` | Base domain; subdomains (`auth.`, `engram.`, `monitor.`) and path prefixes (`/mcp/*`) route under it |
+| `DOMAIN` | Base domain; the `auth.` subdomain and `/mcp/*` path prefixes route under it. `engram-monitor` is intentionally not published — see [engram-monitor backend](#engram-monitor-backend) |
 | `ATLASSIAN_ENC_KEY` | AES-256-GCM key encrypting stored per-user Atlassian credentials |
 | `AUTH_GATEWAY_SESSION_SECRET` | Signs the HttpOnly session cookie issued by `POST /login` |
 | `ENGRAM_CLOUD_*`, `ENGRAM_JWT_SECRET` | `engram-cloud`'s (`engram cloud serve`) own config — team-shared memory instance |
 | `ENGRAM_CLOUD_DB_*` | Postgres credentials for `engram-cloud-db` |
-| `VITE_ENGRAM_URL` | **Build-time only.** engram-monitor's backend base URL, baked into its JS bundle by `vite build` — see the caveat below |
+| `VITE_ENGRAM_URL` | **Build-time only.** engram-monitor's backend base URL, baked into its JS bundle by `vite build` — see [engram-monitor backend](#engram-monitor-backend) below |
 
 ## Engram-monitor source (manual clone)
 
@@ -107,27 +107,85 @@ deliberately **not vendored/committed** (see the `.gitignore` entry). Run
 the clone command in step 2 above before `docker compose up --build`; the
 `engram-monitor` service's build will fail without it.
 
-## engram-monitor compatibility caveat — read before relying on this
+## engram-monitor backend
 
-**This integration is unverified.** engram-monitor's own README and source
-(`src/config/engram.ts`) describe it as a dashboard for a plain
-`engram serve` local HTTP API (observation search/browse endpoints),
-defaulting to `http://127.0.0.1:7437`. This repo's `engram-cloud` service
-instead runs the **different** `engram cloud serve` mode (port `18080`),
-which per public docs only exposes `/health`, `/sync/pull`, `/sync/push`,
-and `/dashboard/*` — plausibly **not** the same API shape engram-monitor's
-UI calls at runtime.
+engram-monitor's own README and source (`src/config/engram.ts`) describe
+it as a dashboard for a plain `engram serve` local HTTP API (observation
+search/browse endpoints), defaulting to `http://127.0.0.1:7437` — **not**
+the same API surface as `engram-cloud`'s `engram cloud serve` mode (port
+`18080`, which only exposes `/health`, `/sync/pull`, `/sync/push`, and its
+own `/dashboard/*`).
 
-For this PR, `VITE_ENGRAM_URL` defaults to `http://engram-cloud:18080` as
-the only available target with an HTTP API in this compose file, but it is
-**not confirmed to work**. Smoke-test it as part of Phase 4 integration
-(`openspec/changes/gateway-foundation/tasks.md`, section 5.x). If the
-dashboard doesn't function against `engram-cloud`'s sync API, the two
-realistic follow-ups are:
+**engram-monitor is deliberately not published through Caddy or DNS.**
+Its client (`src/services/engram.ts`, a bare `axios.create()`) sends no
+Authorization header, no cookies, and no interceptors of any kind — it
+was built to talk to `engram serve` on `localhost`, where the OS itself is
+the trust boundary. That client also calls destructive/data-moving
+endpoints (`DELETE /observations/:id`, `POST /import`,
+`POST /projects/migrate`), and `engram serve` has no auth of its own to
+gate them with. Putting it behind `forward_auth` like every other route
+would 401 every single request (the dashboard would load and show
+nothing); putting it in front of `forward_auth` would expose the team's
+entire memory store — reads and deletes both — on the public internet
+with no authentication at all. Neither is acceptable, so this repo ships
+neither: the route stays off, and access is local-only.
 
-1. Add a dedicated `engram serve` container just for the monitor, or
-2. Accept that engram-monitor isn't usable against the team-shared cloud
-   instance and drop the `monitor.{$DOMAIN}` route.
+To use it, SSH-tunnel `engram-monitor`'s published `127.0.0.1:7438`, then
+open the dashboard locally:
+
+```bash
+ssh -L 7438:localhost:7438 <you>@jagoqui.tech
+# then, on your machine:
+open http://localhost:7438
+```
+
+Only one port to tunnel: the bundled JS calls `/api` (same origin as the
+page itself, not a separate `127.0.0.1:7437`), and `nginx.conf` proxies
+that internally straight to `127.0.0.1:7437` — this container runs with
+`network_mode: host` (see `docker-compose.yml`) specifically because the
+host's `engram serve` binds `127.0.0.1` only, so no bridge-networked
+container (not even via `host.docker.internal`) can reach it; sharing the
+host's own network namespace is the only way in. This proxy isn't just
+convenience — `engram serve` sends no `Access-Control-Allow-Origin`
+header, so a cross-origin `baseURL` (even over a working two-port tunnel)
+gets its responses blocked by the browser's CORS policy regardless of
+whether the TCP connection itself works.
+
+`engram-cloud` (Postgres-backed team sync + its own `/dashboard/*`) is
+unrelated to engram-monitor — see the next section.
+
+## engram-cloud (team-shared memory sync)
+
+Unlike plain `engram serve`, `engram cloud serve` has its own real
+Bearer-token auth (`ENGRAM_CLOUD_TOKEN`), so it's published directly at
+`https://engram-cloud.{$DOMAIN}` — deliberately **not** wrapped in this
+repo's `forward_auth`, since the `engram` CLI's own sync client sends a
+single `Authorization` header carrying `ENGRAM_CLOUD_TOKEN`, which
+`forward_auth` would reject as an invalid gateway token. This token is
+team-wide (one shared secret, not per-user like `/mcp/atlassian`).
+
+Each team member points their own local `engram` install at it once.
+Source the shared token from a git-ignored file (e.g.
+`~/.config/engram/env`, `chmod 600`) rather than typing it directly into
+an interactive shell, where it can land in shell history or `ps` output:
+
+```bash
+source ~/.config/engram/env   # exports ENGRAM_CLOUD_TOKEN
+engram cloud config --server https://engram-cloud.jagoqui.tech
+engram cloud enroll <name>
+engram sync --cloud --project <name>
+```
+
+Or enable background autosync instead of running `sync` by hand — same
+sourced file, plus:
+
+```bash
+export ENGRAM_CLOUD_AUTOSYNC=1
+export ENGRAM_CLOUD_SERVER=https://engram-cloud.jagoqui.tech
+```
+
+Teammates pull what others pushed with `engram sync --cloud --import
+--project <name>`.
 
 ## Adding a new MCP later
 

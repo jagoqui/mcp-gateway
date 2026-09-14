@@ -6,26 +6,32 @@
 
 FROM node:22-bookworm-slim AS build
 
-RUN npm install --global pnpm@9
+# git is required at install time, not for the app itself: engram-monitor's
+# `prepare` script runs `lefthook install` (a git-hooks manager) against
+# the cloned source's own .git directory (copied in below, alongside the
+# source, since services/engram-monitor/src/ is a real git clone).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global pnpm@9
 
 WORKDIR /app
 COPY src/ .
 
 # engram-monitor's backend base URL (src/config/engram.ts) is read at BUILD
 # TIME via `import.meta.env.VITE_ENGRAM_URL` and baked into the compiled JS
-# bundle — it is NOT re-readable at container runtime like a normal env var.
-# Changing it requires rebuilding this image.
+# bundle that runs in the VISITOR'S OWN BROWSER — it is NOT re-readable at
+# container runtime; changing it requires rebuilding this image.
 #
-# UNVERIFIED ASSUMPTION: engram-monitor's own README/source describe it as a
-# dashboard for a plain `engram serve` local API (observation search/browse,
-# default http://127.0.0.1:7437). Our `engram-cloud` service runs the
-# DIFFERENT `engram cloud serve` mode (port 18080), which per public docs
-# only exposes /health, /sync/pull, /sync/push, /dashboard/* — not
-# necessarily the same API surface this dashboard's UI calls. We point this
-# at engram-cloud as the best available target; it must be smoke-tested in
-# Phase 4 (tasks.md 5.x). See README.md's "engram-monitor compatibility
-# caveat" section for the full explanation and fallback options.
-ARG VITE_ENGRAM_URL=http://engram-cloud:18080
+# Deliberately NOT a public URL: this dashboard has no auth mechanism of
+# its own (see README.md's "engram-monitor backend" section), so it is
+# never routed through Caddy. Defaults to /api (relative, same-origin as
+# this page), which nginx.conf proxies internally to the host's own
+# `engram serve` process — the plain local API this dashboard's UI
+# actually calls. Same-origin avoids a CORS failure: engram serve sends
+# no Access-Control-Allow-Origin header, so a cross-origin baseURL (even
+# over a working SSH tunnel) gets its responses blocked by the browser.
+ARG VITE_ENGRAM_URL=/api
 ENV VITE_ENGRAM_URL=${VITE_ENGRAM_URL}
 
 RUN pnpm install && pnpm run build
@@ -35,4 +41,6 @@ FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 80
+# Documentation only — actual binding is network_mode: host (see
+# docker-compose.yml), EXPOSE has no effect there.
+EXPOSE 7438

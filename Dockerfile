@@ -8,6 +8,11 @@
 ARG NODE_IMAGE=node:22-bookworm-slim
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.5.11
 
+# Named stage so `pytools` can `COPY --from=uv_source` below — BuildKit
+# doesn't support variable expansion directly in COPY --from for an image
+# reference, only for a named stage.
+FROM ${UV_IMAGE} AS uv_source
+
 # ---------------------------------------------------------------------------
 # Stage: base
 # Common OS packages and the non-root runtime user shared by every stage.
@@ -28,6 +33,10 @@ RUN apt-get update \
 # Resolves the `engram` GitHub release (or ENGRAM_VERSION pin), downloads
 # the linux/<arch> asset, and verifies it against the release's
 # checksums.txt before install. Fails the build on any verification miss.
+# The release asset is a .tar.gz (CHANGELOG.md/LICENSE/README.md/engram at
+# its root), not a raw binary — must extract before install, or the
+# installed "binary" is actually gzip data and fails at runtime with
+# "exec format error".
 # ---------------------------------------------------------------------------
 FROM base AS artifacts
 
@@ -73,18 +82,29 @@ RUN set -eu; \
         exit 1; \
     fi; \
     sha256sum -c engram.sha256; \
-    install -m 0755 "${ASSET}" /out/engram; \
+    tar -xzf "${ASSET}" engram; \
+    install -m 0755 engram /out/engram; \
     rm -rf /tmp/engram-dl
+# Build-time functional check, not just a checksum: a corrupted extraction
+# or wrong-arch binary can still pass sha256sum and `tar` cleanly while
+# being unusable (this is exactly how the raw-tarball-as-binary bug above
+# slipped past verification — checksum matched, install "succeeded", and
+# only a manual runtime smoke test caught the exec format error). Fails
+# the build immediately instead of shipping a broken image.
+RUN /out/engram --help >/dev/null
 
 # ---------------------------------------------------------------------------
 # Stage: pytools
 # uv + pinned mcp-atlassian, installed as a `uv tool` (native streamable-http
-# transport, no supergateway wrapper needed).
+# transport, no supergateway wrapper needed). 0.23.1 minimum: earlier
+# releases pin fastmcp<2.4.0 with an unbounded pydantic>=2.10.6, so `uv tool
+# install` (no lockfile) resolves today's newest pydantic and breaks fastmcp
+# at import time ("cannot specify both default and default_factory").
 # ---------------------------------------------------------------------------
 FROM base AS pytools
 
-ARG MCP_ATLASSIAN_VERSION=0.11.9
-COPY --from=${UV_IMAGE} /uv /uvx /usr/local/bin/
+ARG MCP_ATLASSIAN_VERSION=0.23.1
+COPY --from=uv_source /uv /uvx /usr/local/bin/
 
 ENV UV_TOOL_DIR=/opt/uv-tools \
     UV_TOOL_BIN_DIR=/opt/uv-tools/bin \
@@ -97,11 +117,15 @@ RUN mkdir -p "${UV_TOOL_DIR}" \
 # ---------------------------------------------------------------------------
 # Stage: nodetools
 # Pinned supergateway + context7 MCP, installed at build time so wrapped
-# services need no runtime network access to fetch themselves.
+# services need no runtime network access to fetch themselves. supergateway
+# 3.x minimum: --outputTransport streamableHttp (what mcp-context7 and
+# mcp-engram-tool run under in docker-compose.yml) doesn't exist before
+# 3.x — 2.8.1's --help only lists stdio/sse/ws. Avoid 3.0.0 specifically,
+# it's missing a dist file (ERR_MODULE_NOT_FOUND on its own entrypoint).
 # ---------------------------------------------------------------------------
 FROM base AS nodetools
 
-ARG SUPERGATEWAY_VERSION=2.8.1
+ARG SUPERGATEWAY_VERSION=3.4.3
 ARG CONTEXT7_MCP_VERSION=1.0.17
 
 RUN mkdir -p /opt/node-tools \
