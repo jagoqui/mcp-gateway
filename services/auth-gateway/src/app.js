@@ -5,6 +5,7 @@ import { decideVerify, authenticate } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
 import { encrypt } from './crypto.js';
+import { handleEngramVerifyRequest } from './engram-verify.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -255,6 +256,15 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'POST' && pathname === '/me/atlassian') {
       runAsyncHandler(handleEnrollAtlassian(req, res, db, config), res);
+      return;
+    }
+
+    // Same isolation principle as elsewhere in this file: engram-hub's
+    // shared-token login is a fully independent authorization model (not
+    // per-user Bearer/cookie), kept in its own module rather than woven
+    // into any handler above.
+    if (pathname === '/engram-verify') {
+      runAsyncHandler(handleEngramVerifyRequest(req, res, { domain: config.domain }), res);
       return;
     }
 
