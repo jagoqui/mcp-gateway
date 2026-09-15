@@ -45,12 +45,7 @@ function insertUser(opts = {}) {
     .prepare(
       'INSERT INTO users (username, password_hash, is_admin, disabled_at) VALUES (?, ?, ?, ?)',
     )
-    .run(
-      username,
-      'bcrypt-placeholder',
-      isAdmin ? 1 : 0,
-      disabled ? '2024-01-01T00:00:00Z' : null,
-    );
+    .run(username, 'bcrypt-placeholder', isAdmin ? 1 : 0, disabled ? '2024-01-01T00:00:00Z' : null);
   return Number(info.lastInsertRowid);
 }
 
@@ -79,9 +74,10 @@ test('GET /admin/verify redirects to the admin login page for a browser request 
     redirect: 'manual',
   });
   assert.equal(res.status, 302);
-  const location = res.headers.get('location');
-  assert.ok(location, 'expected a Location header');
-  assert.match(location ?? '', new RegExp(`^https://admin\\.${DOMAIN}/login`));
+  // Relative, not a separate admin.{domain} host: the admin session cookie
+  // has no Domain= (host-only by design), so login must happen on
+  // whichever host is actually protecting this resource.
+  assert.equal(res.headers.get('location'), '/admin/login');
 });
 
 // 5.3/A1 — a regular, valid (non-admin-secret) session cookie never
@@ -127,4 +123,145 @@ test('threat: a forged Host/X-Forwarded-Host header with no admin cookie never b
 test('an unimplemented /admin/* path returns 404, not a crash', async () => {
   const res = await fetch(`${baseUrl}/admin/users`);
   assert.equal(res.status, 404);
+});
+
+// engram-unified-console Unit 1 — GET /admin/login
+
+test('GET /admin/login renders a zero-JS form with no admin session required', async () => {
+  const res = await fetch(`${baseUrl}/admin/login`);
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('<form'));
+  assert.ok(!body.includes('<script'));
+});
+
+test('GET /admin/login preserves and escapes the next param', async () => {
+  const res = await fetch(
+    `${baseUrl}/admin/login?next=${encodeURIComponent('/monitor"><script>')}`,
+  );
+  const body = await res.text();
+  assert.ok(!body.includes('<script>'));
+});
+
+// engram-unified-console Unit 1 — POST /admin/login
+
+test('POST /admin/login with correct credentials for an is_admin user sets the admin cookie and redirects', async () => {
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword(password);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    'jagoqui',
+    passwordHash,
+  );
+
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: 'jagoqui', password, next: '/monitor' }),
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/monitor');
+  const setCookie = res.headers.get('set-cookie') ?? '';
+  assert.ok(setCookie.includes('__Host-admin_session='));
+});
+
+test('POST /admin/login with correct credentials for a non-admin user is rejected with the same generic failure as a wrong password', async () => {
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword(password);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)').run(
+    'regular-user',
+    passwordHash,
+  );
+
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: 'regular-user', password }),
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 401);
+  assert.equal(res.headers.get('set-cookie'), null);
+  const body = await res.text();
+  assert.ok(body.includes('Invalid username or password'));
+});
+
+test('POST /admin/login with the real monitor.{domain} Origin (where the form is actually served) succeeds', async () => {
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword(password);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    'kevin',
+    passwordHash,
+  );
+
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
+    body: new URLSearchParams({ username: 'kevin', password }),
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 302);
+  assert.ok((res.headers.get('set-cookie') ?? '').includes('__Host-admin_session='));
+});
+
+test('POST /admin/login with the real engram-cloud.{domain} Origin (the other admin-gated host) also succeeds', async () => {
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword(password);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    'laura',
+    passwordHash,
+  );
+
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://engram-cloud.${DOMAIN}`,
+    },
+    body: new URLSearchParams({ username: 'laura', password }),
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 302);
+  assert.ok((res.headers.get('set-cookie') ?? '').includes('__Host-admin_session='));
+});
+
+test('POST /admin/login from a cross-site Origin is rejected before touching the database', async () => {
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: 'https://attacker.example',
+    },
+    body: new URLSearchParams({ username: 'jagoqui', password: 'whatever' }),
+  });
+  assert.equal(res.status, 403);
+});
+
+test('POST /admin/login with a wrong password is rejected with no cookie set', async () => {
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword('the-real-password');
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    'jagoqui',
+    passwordHash,
+  );
+
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: 'jagoqui', password: 'wrong-password' }),
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 401);
+  assert.equal(res.headers.get('set-cookie'), null);
 });

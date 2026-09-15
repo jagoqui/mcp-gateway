@@ -271,6 +271,17 @@ test('POST /login with a cross-site Origin is rejected with 403 csrf_origin_reje
   assert.equal(res.headers.get('set-cookie'), null);
 });
 
+test('POST /login with the real auth.{domain} Origin (where the form is actually served) succeeds', async () => {
+  await insertUser({ username: 'juno', password: 'juno-pw-2026' });
+  const res = await fetch(`${baseUrl}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: `https://auth.${DOMAIN}` },
+    body: JSON.stringify({ username: 'juno', password: 'juno-pw-2026' }),
+  });
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get('set-cookie'));
+});
+
 test('POST /login without an Origin header still succeeds (CLI/curl unaffected, D5 allow-on-absent)', async () => {
   await insertUser({ username: 'iris', password: 'iris-pw-2026' });
   const res = await fetch(`${baseUrl}/login`, {

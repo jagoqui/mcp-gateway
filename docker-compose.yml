@@ -44,6 +44,7 @@ services:
       DOMAIN: ${DOMAIN:-jagoqui.tech}
       ATLASSIAN_ENC_KEY: ${ATLASSIAN_ENC_KEY}
       AUTH_GATEWAY_SESSION_SECRET: ${AUTH_GATEWAY_SESSION_SECRET}
+      AUTH_GATEWAY_ADMIN_SESSION_SECRET: ${AUTH_GATEWAY_ADMIN_SESSION_SECRET}
     volumes:
       - auth_gateway_data:/data
     networks:

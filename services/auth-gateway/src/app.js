@@ -172,9 +172,11 @@ function sendLoginFailure(res, status, { next, username, error }) {
  * @param {{ domain: string, sessionSecret: string }} config
  */
 async function handleLogin(req, res, db, config) {
+  // Served at auth.{$DOMAIN} (Caddyfile), never the apex — the expected
+  // Origin/Referer host must match where the form actually posts from.
   const originOk = isAcceptableOrigin(
     { origin: req.headers.origin, referer: req.headers.referer },
-    { domain: config.domain, strict: false },
+    { domain: `auth.${config.domain}`, strict: false },
   );
   if (!originOk) {
     sendJson(res, 403, { error: 'csrf_origin_rejected' });
@@ -258,9 +260,11 @@ function authenticateCookieWrite(req, res, db, config) {
     return null;
   }
   if (authResult.method === 'cookie') {
+    // Same auth.{$DOMAIN} reasoning as handleLogin above — every
+    // cookie-authenticated write this guards is served there too.
     const originOk = isAcceptableOrigin(
       { origin: req.headers.origin, referer: req.headers.referer },
-      { domain: config.domain, strict: true },
+      { domain: `auth.${config.domain}`, strict: true },
     );
     if (!originOk) {
       sendJson(res, 403, { error: 'csrf_origin_rejected' });

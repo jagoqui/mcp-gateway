@@ -10,7 +10,9 @@ import { createServer } from '../src/app.js';
 
 const DOMAIN = 'test.example';
 const SESSION_SECRET = 'panel-test-session-secret';
-const ORIGIN = `https://${DOMAIN}`;
+// Every route in this file is served at auth.{$DOMAIN} (Caddyfile), never
+// the apex — matches authenticateCookieWrite's expected Origin/Referer host.
+const ORIGIN = `https://auth.${DOMAIN}`;
 
 before(() => {
   process.env.ATLASSIAN_ENC_KEY = crypto.randomBytes(32).toString('base64');
