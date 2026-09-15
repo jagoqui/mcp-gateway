@@ -25,6 +25,46 @@ export async function createUser(db, opts) {
 }
 
 /**
+ * Creates a regular (is_admin=0, hardcoded — never settable via `opts`) user
+ * and records its `user.create` audit row atomically (D8) — the admin
+ * panel's `POST /admin/users` uses this instead of the plain `createUser`
+ * above, which is CLI-only, unaudited, and can create admins.
+ *
+ * `hashPassword` runs BEFORE `db.transaction(...)`: bcrypt is genuinely
+ * async (libuv thread pool), but better-sqlite3 transactions must be a
+ * synchronous callback — the same split `regenerateToken` below uses for
+ * its (synchronous) `crypto.randomBytes` call. A duplicate username throws
+ * inside the transaction, which better-sqlite3 rolls back whole — the audit
+ * insert, ordered after the user insert, never runs, so a failed create
+ * writes nothing at all (not even a partial audit row).
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ username: string, password: string, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {Promise<{ id: number, username: string }>}
+ */
+export async function createManagedUser(db, opts) {
+  const { username, password, actorUserId, actorLabel } = opts;
+  const passwordHash = await hashPassword(password);
+
+  const runTransaction = db.transaction(() => {
+    const info = db
+      .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)')
+      .run(username, passwordHash);
+    const id = Number(info.lastInsertRowid);
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'user.create',
+      outcome: 'success',
+      targetUserId: id,
+      detail: { username },
+    });
+    return { id, username };
+  });
+
+  return runTransaction();
+}
+
+/**
  * Issues a token; only its SHA-256 hash is persisted. Ported verbatim from
  * bin/admin.js (D11).
  * @param {import('better-sqlite3').Database} db

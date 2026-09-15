@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { escapeHtml } from '../src/html.js';
+import { escapeHtml, PAGE_HEADERS, ADMIN_PAGE_HEADERS } from '../src/html.js';
 
 test('escapeHtml neutralizes &, <, >, ", and \' individually', () => {
   assert.equal(escapeHtml('&'), '&amp;');
@@ -29,4 +29,12 @@ test('escapeHtml renders a <script>-bearing value inert (R6)', () => {
   const result = escapeHtml(malicious);
   assert.ok(!result.includes('<script'), 'escaped output must not contain a live <script tag');
   assert.equal(result, '&lt;script&gt;alert(document.cookie)&lt;/script&gt;');
+});
+
+test('ADMIN_PAGE_HEADERS carries every PAGE_HEADERS entry plus Referrer-Policy: no-referrer', () => {
+  for (const [key, value] of Object.entries(PAGE_HEADERS)) {
+    assert.equal(ADMIN_PAGE_HEADERS[key], value);
+  }
+  assert.equal(ADMIN_PAGE_HEADERS['Referrer-Policy'], 'no-referrer');
+  assert.ok(Object.isFrozen(ADMIN_PAGE_HEADERS));
 });

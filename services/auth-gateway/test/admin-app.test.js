@@ -122,8 +122,10 @@ test('threat: a forged Host/X-Forwarded-Host header with no admin cookie never b
 
 // 5.5 — confirm an unrelated /admin/* path still 404s (dispatcher skeleton),
 // and every existing route on app.js is unaffected by the new branch.
+// /admin/users/tokens is Unit 10 — still genuinely unimplemented, unlike
+// /admin/users itself (Unit 8, GET/POST) below.
 test('an unimplemented /admin/* path returns 404, not a crash', async () => {
-  const res = await fetch(`${baseUrl}/admin/users`);
+  const res = await fetch(`${baseUrl}/admin/users/tokens`);
   assert.equal(res.status, 404);
 });
 
@@ -519,4 +521,247 @@ test('a regular (non-admin) session cookie never authenticates POST /admin/logou
     headers: { Cookie: `session=${regularToken}` },
   });
   assert.equal(res.status, 401);
+});
+
+// Phase 8 — GET /admin/users + POST /admin/users
+
+/** @returns {{ userId: number, cookie: string, adminSecret: string }} */
+function loginAsAdmin(username = 'unit8-admin') {
+  const userId = insertUser({ username });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  return { userId, cookie: `__Host-admin_session=${token}` };
+}
+
+test('GET /admin/users with no admin cookie and a non-html Accept returns 401 JSON', async () => {
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Accept: 'application/json' } });
+  assert.equal(res.status, 401);
+});
+
+test('GET /admin/users with Accept: text/html and no admin cookie redirects to /admin/login?next=%2Fadmin%2Fusers', async () => {
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    headers: { Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/login?next=%2Fadmin%2Fusers');
+});
+
+test('a regular (non-admin) session cookie never authenticates GET /admin/users', async () => {
+  const userId = insertUser({ username: 'users-regular-cookie-test' });
+  const regularToken = createSessionToken({ uid: userId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    headers: { Cookie: `session=${regularToken}`, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/no-referrer header set and no <script>', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.ok(res.headers.get('content-security-policy'));
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+  const body = await res.text();
+  assert.ok(!body.includes('<script'));
+});
+
+test('GET /admin/users lists only is_admin=0 users, with disabled state and token counts, never admin rows', async () => {
+  const { cookie } = loginAsAdmin();
+  const regularId = insertUser({ username: 'regular-listed', isAdmin: false });
+  insertUser({ username: 'disabled-listed', isAdmin: false, disabled: true });
+  db.prepare('INSERT INTO tokens (user_id, token_hash) VALUES (?, ?)').run(
+    regularId,
+    'hash-active',
+  );
+  db.prepare(
+    "INSERT INTO tokens (user_id, token_hash, revoked_at) VALUES (?, ?, datetime('now'))",
+  ).run(regularId, 'hash-revoked');
+
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('regular-listed'));
+  assert.ok(body.includes('disabled-listed'));
+  assert.ok(!body.includes('unit8-admin'));
+});
+
+test('threat: a malicious username is HTML-escaped in the rendered users list, not live markup (A12)', async () => {
+  const { cookie } = loginAsAdmin();
+  insertUser({ username: '<img src=x onerror=alert(1)>', isAdmin: false });
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(!body.includes('<img src=x onerror'));
+  assert.ok(body.includes('&lt;img'));
+});
+
+test('GET /admin/users?error=<unknown> renders no error banner', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users?error=not-a-real-code`, {
+    headers: { Cookie: cookie },
+  });
+  const body = await res.text();
+  assert.ok(!body.includes('class="error"'));
+});
+
+test('GET /admin/users embeds a hidden csrf field that verifies for the caller uid', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  const match = body.match(/name="csrf" value="([^"]+)"/);
+  assert.ok(match, 'expected a hidden csrf field');
+  const { verifyAdminCsrfToken } = await import('../src/csrf.js');
+  assert.equal(verifyAdminCsrfToken(match[1], { uid: userId, adminSecret: ADMIN_SECRET }), true);
+});
+
+test('POST /admin/users with valid admin cookie, Origin, and CSRF creates an is_admin=0 user and redirects', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ username: 'brand-new-user', password: 'a-strong-password', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users');
+
+  const row = /** @type {any} */ (
+    db.prepare('SELECT * FROM users WHERE username = ?').get('brand-new-user')
+  );
+  assert.ok(row);
+  assert.equal(row.is_admin, 0);
+});
+
+test('POST /admin/users cannot set is_admin via the body — a spoofed isAdmin field is ignored', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      username: 'spoofed-admin-attempt',
+      password: 'a-strong-password',
+      isAdmin: 'true',
+      csrf,
+    }),
+    redirect: 'manual',
+  });
+  const row = /** @type {any} */ (
+    db.prepare('SELECT * FROM users WHERE username = ?').get('spoofed-admin-attempt')
+  );
+  assert.equal(row.is_admin, 0);
+});
+
+test('POST /admin/users with a duplicate username redirects to /admin/users?error=duplicate, no row created', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  insertUser({ username: 'already-taken', isAdmin: false });
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ username: 'already-taken', password: 'a-strong-password', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=duplicate');
+  const count = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM users WHERE username = ?').get('already-taken')
+  ).n;
+  assert.equal(count, 1);
+});
+
+test('POST /admin/users with a missing password redirects to /admin/users?error=invalid', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ username: 'no-password-user', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=invalid');
+});
+
+test('POST /admin/users with a mismatched Origin returns 403, before touching the database', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ username: 'never-created', password: 'whatever', csrf }),
+  });
+  assert.equal(res.status, 403);
+  const row = db.prepare('SELECT * FROM users WHERE username = ?').get('never-created');
+  assert.equal(row, undefined);
+});
+
+test('POST /admin/users with a missing CSRF token (form) redirects to /admin/users?error=csrf', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ username: 'csrf-missing-user', password: 'whatever' }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=csrf');
+});
+
+test('POST /admin/users with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: 'nope', password: 'whatever' }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test('a successful POST /admin/users writes one user.create audit row', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      username: 'audited-new-user',
+      password: 'a-strong-password',
+      csrf,
+    }),
+  });
+  const rows = db.prepare('SELECT * FROM admin_audit_log').all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, 'user.create');
+  assert.equal(rows[0].outcome, 'success');
+  assert.equal(rows[0].actor_user_id, userId);
 });

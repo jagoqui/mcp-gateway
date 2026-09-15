@@ -85,3 +85,16 @@ export const PAGE_HEADERS = Object.freeze({
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
 });
+
+/**
+ * PAGE_HEADERS plus Referrer-Policy: no-referrer (design.md's File Changes
+ * table) for every rendered admin panel page (GET /admin/login,
+ * GET /admin/users, GET /admin/users/tokens) — a stricter default than the
+ * regular panel needs, since admin URLs are the highest-value surface to
+ * avoid leaking via Referer to any third party a link is ever pasted into.
+ * @type {Record<string, string>}
+ */
+export const ADMIN_PAGE_HEADERS = Object.freeze({
+  ...PAGE_HEADERS,
+  'Referrer-Policy': 'no-referrer',
+});

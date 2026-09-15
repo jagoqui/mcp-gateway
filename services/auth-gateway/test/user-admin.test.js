@@ -4,6 +4,7 @@ import { openDb } from '../src/db.js';
 import { verifyPassword } from '../src/tokens.js';
 import {
   createUser,
+  createManagedUser,
   issueToken,
   revokeToken,
   listManagedUsers,
@@ -13,6 +14,11 @@ import {
   revokeTokenById,
   regenerateToken,
 } from '../src/user-admin.js';
+
+/** @returns {any[]} */
+function allAuditRows(db) {
+  return db.prepare('SELECT * FROM admin_audit_log ORDER BY id').all();
+}
 
 // 2.1 — byte-for-byte port baseline (D11), reusing test/admin.test.js's assertions.
 test('createUser inserts a user with a bcrypt-hashed password', async () => {
@@ -30,6 +36,79 @@ test('createUser rejects a duplicate username', async () => {
   const db = openDb(':memory:');
   await createUser(db, { username: 'bob', password: 'pw-one' });
   await assert.rejects(() => createUser(db, { username: 'bob', password: 'pw-two' }));
+  db.close();
+});
+
+// Unit 8 — POST /admin/users' audited create path.
+test('createManagedUser inserts an is_admin=0 user with a bcrypt-hashed password, regardless of any other flag', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createManagedUser(db, {
+    username: 'nadia',
+    password: 'a-strong-password',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+  assert.equal(user.username, 'nadia');
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(user.id));
+  assert.equal(row.is_admin, 0);
+  assert.equal(await verifyPassword('a-strong-password', row.password_hash), true);
+  db.close();
+});
+
+test('createManagedUser writes exactly one user.create audit row naming the actor and the new user', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createManagedUser(db, {
+    username: 'oscar',
+    password: 'irrelevant',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+
+  const rows = allAuditRows(db);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, 'user.create');
+  assert.equal(rows[0].outcome, 'success');
+  assert.equal(rows[0].actor_user_id, admin.id);
+  assert.equal(rows[0].actor_label, 'root-admin');
+  assert.equal(rows[0].target_user_id, user.id);
+  assert.equal(JSON.parse(rows[0].detail).username, 'oscar');
+  db.close();
+});
+
+test('createManagedUser rejects a duplicate username and writes no audit row (D8)', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  await createManagedUser(db, {
+    username: 'petra',
+    password: 'pw-one',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+
+  await assert.rejects(() =>
+    createManagedUser(db, {
+      username: 'petra',
+      password: 'pw-two',
+      actorUserId: admin.id,
+      actorLabel: 'root-admin',
+    }),
+  );
+
+  assert.equal(allAuditRows(db).length, 1);
   db.close();
 });
 
