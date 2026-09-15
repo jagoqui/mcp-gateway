@@ -23,16 +23,24 @@ COPY src/ .
 # bundle that runs in the VISITOR'S OWN BROWSER — it is NOT re-readable at
 # container runtime; changing it requires rebuilding this image.
 #
-# Deliberately NOT a public URL: this dashboard has no auth mechanism of
-# its own (see README.md's "engram-monitor backend" section), so it is
-# never routed through Caddy. Defaults to /api (relative, same-origin as
-# this page), which nginx.conf proxies internally to the host's own
-# `engram serve` process — the plain local API this dashboard's UI
-# actually calls. Same-origin avoids a CORS failure: engram serve sends
-# no Access-Control-Allow-Origin header, so a cross-origin baseURL (even
-# over a working SSH tunnel) gets its responses blocked by the browser.
+# This dashboard has no auth mechanism of its own — gated instead at
+# Caddy's forward_auth against auth-gateway's /admin/verify (same admin
+# session as the rest of /admin/*), never exposed unauthenticated. Same-
+# origin, relative default (/api under whatever base path this build is
+# served at — see VITE_BASE_PATH), which nginx.conf proxies internally to
+# engram-serve-bridge: `engram serve` sends no Access-Control-Allow-Origin
+# header, so a cross-origin baseURL gets its responses blocked by the
+# browser regardless of network reachability.
 ARG VITE_ENGRAM_URL=/api
 ENV VITE_ENGRAM_URL=${VITE_ENGRAM_URL}
+
+# Served under a shared domain's /monitor/ subpath (see nginx.conf) instead
+# of its own dedicated host — every asset reference the build emits must
+# carry this same prefix, or the browser resolves them against the domain
+# root instead of /monitor/ and the page loads with no CSS/JS. See
+# vite.config.ts's `base`.
+ARG VITE_BASE_PATH=/
+ENV VITE_BASE_PATH=${VITE_BASE_PATH}
 
 RUN pnpm install && pnpm run build
 
@@ -41,6 +49,4 @@ FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Documentation only — actual binding is network_mode: host (see
-# docker-compose.yml), EXPOSE has no effect there.
-EXPOSE 7438
+EXPOSE 80

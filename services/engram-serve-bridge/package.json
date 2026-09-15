@@ -1,0 +1,23 @@
+{
+  "name": "engram-serve-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reverse-proxy wrapper exposing a loopback-only `engram serve` process to the Docker network, so engram-monitor can reach it from another container.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --check ."
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "26.3.0",
+    "eslint": "^10.9.1",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
+  }
+}

@@ -79,31 +79,74 @@ auth.{$DOMAIN:jagoqui.tech} {
 	}
 }
 
-# engram-monitor and the host's `engram serve` API are deliberately NOT
-# published here. engram-monitor's browser client sends no auth credentials
-# at all (see README.md's "engram-monitor backend" section), so gating its
-# API behind forward_auth would 401 every request, and exposing plain
-# `engram serve` (read + delete + import/migrate) on the public internet
-# with no auth would break this stack's single-perimeter guarantee. Access
-# both locally via an SSH tunnel instead — see the README section above.
+# Consolidated onto engram-cloud.{$DOMAIN}/monitor (single domain, single
+# login per user request — see that block below) instead of its own host.
+# Kept as a redirect, not removed, so existing bookmarks/links still land
+# somewhere real.
+monitor.{$DOMAIN:jagoqui.tech} {
+	redir https://engram-cloud.{$DOMAIN:jagoqui.tech}/monitor{uri} permanent
+}
 
-# Unlike plain `engram serve`, `engram cloud serve` has its own real
-# Bearer-token auth (ENGRAM_CLOUD_TOKEN) — safe to expose directly. Deliberately
-# NOT wrapped in our own forward_auth: the `engram` CLI's own sync client sends
-# a single Authorization header carrying ENGRAM_CLOUD_TOKEN, which forward_auth
-# would reject as an invalid gateway token, breaking sync entirely. This is
+# `engram cloud serve` has its own real Bearer-token auth (ENGRAM_CLOUD_TOKEN),
 # team-wide (one shared token for everyone, not per-user like /mcp/atlassian).
-# Verified directly against the running container before exposing this,
-# including the real client workflow documented below (`engram cloud
-# config` / `enroll` are local-only, no server call at all — confirmed by
-# running them against a real cloud sync target with a deliberately wrong
-# token: no rejection, because nothing was sent over the wire; the actual
-# server round-trip only happens on `engram sync --cloud`, which DID
-# reject that same wrong token with "401: unauthorized: unknown token").
-# /health is open (status only, no data), /dashboard redirects to its own
-# /dashboard/login, and /sync/pull and /sync/push — the same surface the
-# real `sync --cloud` manifest-fetch call hit above — both return 401
-# without a valid token.
+# /health and /sync/* MUST stay carved out of our own forward_auth below: the
+# `engram` CLI's sync client sends a single Authorization header carrying
+# ENGRAM_CLOUD_TOKEN, which forward_auth would reject as an invalid gateway
+# token, breaking sync entirely — same carve-out reasoning as auth.{$DOMAIN}'s
+# /login and /verify. Verified directly against the running container,
+# including the real client workflow (`engram cloud config` / `enroll` are
+# local-only, no server call at all — confirmed by running them against a
+# real cloud sync target with a deliberately wrong token: no rejection,
+# because nothing was sent over the wire; the actual server round-trip only
+# happens on `engram sync --cloud`, which DID reject that same wrong token
+# with "401: unauthorized: unknown token").
+#
+# Everything else on this domain — /dashboard (redirects to its own
+# /dashboard/login) AND /monitor (engram-monitor, built with
+# VITE_BASE_PATH=/monitor/ — see services/engram-monitor/Dockerfile) —
+# sits behind the same admin session (single perimeter, single domain per
+# user request): an unauthenticated visitor can no longer even reach
+# Cloud's own login screen. Cloud's own token prompt still appears as a
+# second step after /dashboard specifically — there is no partial-disable
+# of ENGRAM_CLOUD_INSECURE_NO_AUTH (it's all-or-nothing for the whole
+# process, /sync/* included), so a true single-step login for /dashboard
+# would require auto-relaying a real per-user or the shared wildcard token
+# into Cloud's own /dashboard/login, which needs a secret this Caddyfile
+# has no access to. See openspec/changes/engram-unified-console.
 engram-cloud.{$DOMAIN:jagoqui.tech} {
-	reverse_proxy engram-cloud:18080
+	handle /health* {
+		reverse_proxy engram-cloud:18080
+	}
+
+	handle /sync/* {
+		reverse_proxy engram-cloud:18080
+	}
+
+	# Same carve-out reasoning as auth.{$DOMAIN}'s /login and /verify —
+	# /admin/login MUST stay reachable without a prior forward_auth check,
+	# or the gate below locks out its own login page. Straight to
+	# auth-gateway, not engram-cloud:18080 — there's no nginx layer in
+	# front of this host's /dashboard side to route it through.
+	handle /admin/login* {
+		reverse_proxy auth-gateway:3000
+	}
+
+	# Full path forwarded as-is (no stripping) — engram-monitor's own
+	# nginx.conf matches on /monitor/* directly, since its build already
+	# has that same prefix baked into every asset reference.
+	handle /monitor* {
+		forward_auth auth-gateway:3000 {
+			uri /admin/verify
+			import strip_gateway_headers
+		}
+		reverse_proxy engram-monitor:80
+	}
+
+	handle {
+		forward_auth auth-gateway:3000 {
+			uri /admin/verify
+			import strip_gateway_headers
+		}
+		reverse_proxy engram-cloud:18080
+	}
 }

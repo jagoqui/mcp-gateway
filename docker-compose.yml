@@ -35,6 +35,7 @@ services:
       - mcp-atlassian
       - engram-router
       - engram-cloud
+      - engram-monitor
 
   auth-gateway:
     build:
@@ -130,6 +131,36 @@ services:
       # enrollment AND its not-yet-synced local memory, silently.
       - engram_router_data:/home/app/.engram
 
+  # Multi-project `engram serve` reverse-proxy wrapper — engram-monitor's
+  # backend. `engram serve` only ever binds 127.0.0.1, no CLI flag or env
+  # var to change that (confirmed against source), so this small wrapper
+  # spawns it internally and re-exposes it on the gateway network under the
+  # DNS name every other service in this stack already expects:
+  # `engram-serve:7437`. See openspec/changes/engram-unified-console/design.md.
+  engram-serve:
+    build:
+      context: ./services/engram-serve-bridge
+      args:
+        ENGRAM_VERSION: ${ENGRAM_VERSION:-}
+    restart: unless-stopped
+    environment:
+      PORT: "7437"
+      ENGRAM_SERVE_PORT: "17437"
+      # Same legacy wildcard token engram-router uses — see design.md.
+      ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN}
+      ENGRAM_CLOUD_SERVER: http://engram-cloud:18080
+    networks:
+      - gateway
+    depends_on:
+      - engram-cloud
+    expose:
+      - "7437"
+    volumes:
+      # Same reasoning as engram_router_data — engram serve's own local
+      # SQLite store (sync_enrolled_projects + any not-yet-synced memory)
+      # must survive a plain image rebuild.
+      - engram_serve_data:/home/app/.engram
+
   engram-cloud-db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -186,29 +217,32 @@ services:
     expose:
       - "18080"
 
-  # Deliberately NOT routed through Caddy or published publicly — see
-  # Caddyfile's comment and README.md's "engram-monitor backend" section
-  # (its client sends no auth credentials, so it can't sit behind
-  # forward_auth without breaking, and the underlying engram serve API has
-  # no auth of its own to expose publicly instead). Reach it via a single
-  # SSH tunnel of port 7438; nginx.conf proxies /api/* internally to the
-  # host's engram serve, keeping the browser same-origin (engram serve
-  # sends no CORS headers, so a cross-origin baseURL gets its responses
-  # blocked by the browser regardless of tunnel connectivity).
-  #
-  # network_mode: host, not the gateway bridge network: the host's engram
-  # serve binds 127.0.0.1 only (not 0.0.0.0), so no bridge-networked
-  # container — not even via host.docker.internal — can reach it. Sharing
-  # the host's own network namespace is the only way in. This also means
-  # no `ports:`/`networks:`/`expose:` here — nginx.conf listens directly
-  # on the host's port 7438 (chosen to stay clear of Caddy's 80/443).
+  # Routed through Caddy's `monitor.{$DOMAIN}` block, gated by the same
+  # admin session as Engram Cloud's own dashboard (forward_auth against
+  # auth-gateway's /admin/verify — see Caddyfile). nginx.conf proxies
+  # /api/* to engram-serve:7437 (Docker DNS, no more loopback/host-network
+  # dependency) and /admin/* to auth-gateway:3000, keeping the browser
+  # same-origin. See openspec/changes/engram-unified-console/design.md's
+  # "engram-monitor leaves network_mode: host" decision — the only reason
+  # it needed the host's network namespace was to reach the bare host's
+  # loopback-only engram serve, a constraint the engram-serve-bridge
+  # service above removes.
   engram-monitor:
     build:
       context: ./services/engram-monitor
       args:
-        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-/api}
+        # Consolidated onto engram-cloud.{$DOMAIN}'s own /monitor/ subpath
+        # (single-domain, single-login) — both must agree with nginx.conf's
+        # /monitor/ locations and the Caddyfile's `handle /monitor*` block.
+        VITE_BASE_PATH: /monitor/
+        VITE_ENGRAM_URL: ${VITE_ENGRAM_URL:-/monitor/api}
     restart: unless-stopped
-    network_mode: host
+    networks:
+      - gateway
+    depends_on:
+      - engram-serve
+    expose:
+      - "80"
 
 networks:
   gateway:
@@ -220,3 +254,4 @@ volumes:
   auth_gateway_data:
   engram_cloud_db_data:
   engram_router_data:
+  engram_serve_data:
