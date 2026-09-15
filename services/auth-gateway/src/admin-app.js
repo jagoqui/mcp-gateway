@@ -3,17 +3,33 @@ import {
   createAdminSessionToken,
   getAdminSessionSecret,
   serializeAdminSessionCookie,
+  clearAdminSessionCookie,
 } from './admin-session.js';
 import { wantsHtml } from './verify.js';
 import { verifyPassword } from './tokens.js';
 import { PAGE_HEADERS } from './html.js';
 import { sanitizeNext } from './login-page.js';
 import { renderAdminLoginPage } from './admin-login-page.js';
-import { isAcceptableOrigin } from './csrf.js';
+import { isAcceptableOrigin, verifyAdminCsrfToken } from './csrf.js';
+import { createLoginThrottle } from './admin-throttle.js';
+import { recordAudit } from './admin-audit.js';
 
 // Every subdomain the Caddyfile carves /admin/login* out of forward_auth
 // for — keep in sync with the Caddyfile's admin-gated vhosts.
 const ADMIN_LOGIN_HOSTS = ['monitor', 'engram-cloud'];
+
+// One process-lifetime throttle (D12/A9): a container restart is the
+// documented escape hatch for the single-admin lockout DoS this key choice
+// accepts, so the map deliberately does NOT survive a restart.
+const adminLoginThrottle = createLoginThrottle();
+
+// bcrypt.hash('admin-login-constant-work-dummy', 12) — a fixed, non-secret
+// hash compared against on every unknown-username attempt (D13) so
+// verifyPassword always does the same bcrypt work whether or not the
+// submitted username exists. Without this, an unknown username skips
+// bcrypt entirely and returns measurably faster than a known one with a
+// wrong password, letting an attacker enumerate valid usernames by timing.
+const DUMMY_PASSWORD_HASH = '$2b$12$VW/Xq0GkGvmTqgW/Of4vGemqIfLdaPlVHjl3gN2AJLBwsjGDNb.OK';
 
 // A local copy of app.js's readBody — deliberately not imported from there:
 // app.js imports handleAdminRequest FROM this module, so importing anything
@@ -88,9 +104,8 @@ function sendJson(res, status, body) {
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
- * @param {{ domain: string }} config
  */
-function handleAdminVerify(req, res, db, config) {
+function handleAdminVerify(req, res, db) {
   const adminSecret = getAdminSessionSecret();
   const user = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
   if (!user) {
@@ -141,6 +156,13 @@ function sendAdminLoginFailure(res, status, { next, username, error }) {
  * exact same generic failure as a wrong password (never distinguishing
  * "wrong password" from "not an admin" to an attacker). On success, issues
  * the already-implemented admin session cookie.
+ *
+ * Guard order (design.md Route Inventory): strict-per-host Origin -> body ->
+ * throttle (needs the parsed username) -> constant-work verify (D13). Every
+ * outcome — throttled, bad credentials, not-admin, or success — writes one
+ * `admin_audit_log` row (design.md "Logged actions"); failures carry no
+ * actor (the attempt was never authenticated) and record the *submitted*
+ * username as `actorLabel` so the row stays readable.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
@@ -184,12 +206,52 @@ async function handlePostAdminLogin(req, res, db, config) {
     return;
   }
 
+  // `users.username` is UNIQUE COLLATE NOCASE (db.js), so the SELECT below
+  // already treats 'Admin'/'admin'/'ADMIN' as the same row — the throttle
+  // key must fold case the same way, or an attacker bypasses the lockout by
+  // simply varying case on every 6th attempt.
+  const throttleKey = username.toLowerCase();
+  if (adminLoginThrottle.isLocked(throttleKey)) {
+    recordAudit(db, {
+      actorUserId: null,
+      actorLabel: username,
+      action: 'login',
+      outcome: 'failure',
+      detail: { reason: 'throttled' },
+    });
+    if (isForm) {
+      sendAdminLoginFailure(res, 429, {
+        next,
+        username,
+        error: 'Too many attempts. Try again later.',
+      });
+      return;
+    }
+    sendJson(res, 429, { error: 'too_many_attempts' });
+    return;
+  }
+
   const user = /** @type {any} */ (
     db.prepare('SELECT * FROM users WHERE username = ?').get(username)
   );
-  const validPassword = user ? await verifyPassword(password, user.password_hash) : false;
+  // Constant-work (D13): verifyPassword always runs bcrypt, against the
+  // real hash when the user exists or a fixed dummy hash when it doesn't —
+  // an unknown username must take exactly as long to reject as a wrong
+  // password for a real one, or the timing itself enumerates usernames.
+  const validPassword = await verifyPassword(
+    password,
+    user ? user.password_hash : DUMMY_PASSWORD_HASH,
+  );
 
-  if (!user || user.disabled_at || user.is_admin !== 1 || !validPassword) {
+  if (!user || !validPassword) {
+    adminLoginThrottle.recordFailure(throttleKey);
+    recordAudit(db, {
+      actorUserId: null,
+      actorLabel: username,
+      action: 'login',
+      outcome: 'failure',
+      detail: { reason: 'bad_credentials' },
+    });
     if (isForm) {
       sendAdminLoginFailure(res, 401, { next, username, error: 'Invalid username or password.' });
       return;
@@ -197,6 +259,31 @@ async function handlePostAdminLogin(req, res, db, config) {
     sendJson(res, 401, { error: 'invalid_credentials' });
     return;
   }
+
+  if (user.disabled_at || user.is_admin !== 1) {
+    adminLoginThrottle.recordFailure(throttleKey);
+    recordAudit(db, {
+      actorUserId: null,
+      actorLabel: username,
+      action: 'login',
+      outcome: 'failure',
+      detail: { reason: 'not_admin' },
+    });
+    if (isForm) {
+      sendAdminLoginFailure(res, 401, { next, username, error: 'Invalid username or password.' });
+      return;
+    }
+    sendJson(res, 401, { error: 'invalid_credentials' });
+    return;
+  }
+
+  adminLoginThrottle.reset(throttleKey);
+  recordAudit(db, {
+    actorUserId: user.id,
+    actorLabel: user.username,
+    action: 'login',
+    outcome: 'success',
+  });
 
   const adminSecret = getAdminSessionSecret();
   const token = createAdminSessionToken(user.id, adminSecret);
@@ -212,13 +299,88 @@ async function handlePostAdminLogin(req, res, db, config) {
 }
 
 /**
+ * POST /admin/logout — the full 5-step admin write guard (design.md Route
+ * Inventory: "admin cookie | full 5-step"), then clears the admin session
+ * cookie and audits the action. Unlike the other admin writes, there is no
+ * DB mutation to combine with the audit insert in one transaction (D8) —
+ * clearing a cookie is not a database row — so `recordAudit` runs standalone.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminLogout(req, res, db, config) {
+  // 1. Authenticate — cookie only (authenticateAdmin never reads Bearer).
+  const adminSecret = getAdminSessionSecret();
+  const user = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!user) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  // 2. Origin check — strict (D7): an authenticated mutation has no CLI use
+  // case, unlike the login form's caller-may-omit-Origin exception.
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  // 3. Parse body (form 'csrf' field, or header-only for non-form callers).
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  // 4. CSRF token — header first (DELETE-style callers), else the form field.
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  const csrfOk = verifyAdminCsrfToken(csrfToken, { uid: user.id, adminSecret });
+  if (!csrfOk) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/login' });
+      res.end();
+      return;
+    }
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  // 5. Mutate: clear the cookie, audit the logout.
+  res.setHeader('Set-Cookie', clearAdminSessionCookie());
+  recordAudit(db, {
+    actorUserId: user.id,
+    actorLabel: user.username,
+    action: 'logout',
+    outcome: 'success',
+  });
+
+  if (isForm) {
+    res.writeHead(302, { Location: '/admin/login' });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
- * its own module so the two auth models never interleave in one file. Only
- * GET /admin/verify is implemented in this unit; every other /admin/* path
- * 404s until its own unit lands (Phases 6-11). The authorization boundary
- * is always this path prefix, never req.headers.host (D2) — nothing in
- * this dispatcher or authenticateAdmin ever reads Host/X-Forwarded-Host.
+ * its own module so the two auth models never interleave in one file.
+ * /admin/verify, /admin/login (GET+POST), and /admin/logout are implemented;
+ * every other /admin/* path 404s until its own unit lands (Phases 8-11).
+ * The authorization boundary is always this path prefix, never
+ * req.headers.host (D2) — nothing in this dispatcher or authenticateAdmin
+ * ever reads Host/X-Forwarded-Host.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
@@ -230,7 +392,7 @@ export async function handleAdminRequest(req, res, db, config) {
   const { pathname } = url;
 
   if (req.method === 'GET' && pathname === '/admin/verify') {
-    handleAdminVerify(req, res, db, config);
+    handleAdminVerify(req, res, db);
     return true;
   }
 
@@ -241,6 +403,11 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/login') {
     await handlePostAdminLogin(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/logout') {
+    await handlePostAdminLogout(req, res, db, config);
     return true;
   }
 

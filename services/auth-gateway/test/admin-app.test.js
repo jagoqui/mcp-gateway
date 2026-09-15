@@ -5,6 +5,8 @@ import { openDb } from '../src/db.js';
 import { createServer } from '../src/app.js';
 import { createAdminSessionToken } from '../src/admin-session.js';
 import { createSessionToken } from '../src/session.js';
+import { issueAdminCsrfToken } from '../src/csrf.js';
+import { ADMIN_LOGIN_MAX_ATTEMPTS } from '../src/admin-throttle.js';
 
 const DOMAIN = 'test.example';
 const SESSION_SECRET = 'test-session-secret';
@@ -264,4 +266,228 @@ test('POST /admin/login with a wrong password is rejected with no cookie set', a
 
   assert.equal(res.status, 401);
   assert.equal(res.headers.get('set-cookie'), null);
+});
+
+// Phase 6 — admin login throttle (A9/D12/D13)
+
+/** @returns {any[]} */
+function allAuditRows() {
+  return db.prepare('SELECT * FROM admin_audit_log ORDER BY id').all();
+}
+
+/**
+ * POST /admin/login with a fresh URLSearchParams body every call — sending
+ * one URLSearchParams instance twice silently posts an empty body the
+ * second time (fetch consumes it as a stream).
+ * @param {{ username: string, password: string }} creds
+ */
+function postAdminLogin(creds) {
+  return fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(creds),
+    redirect: 'manual',
+  });
+}
+
+test('the 6th failed attempt for one username within the window is 429, even with the correct password', async () => {
+  const username = 'throttle-lockout-test';
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword(password);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    username,
+    passwordHash,
+  );
+
+  for (let i = 0; i < ADMIN_LOGIN_MAX_ATTEMPTS; i += 1) {
+    const res = await postAdminLogin({ username, password: 'wrong-password' });
+    assert.equal(res.status, 401);
+  }
+
+  const res = await postAdminLogin({ username, password });
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get('set-cookie'), null);
+});
+
+test('the throttle key folds case — 6th attempt with a different-case username is still 429', async () => {
+  const username = 'Throttle-Case-Test';
+  const { hashPassword } = await import('../src/tokens.js');
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    username,
+    await hashPassword('whatever'),
+  );
+
+  for (let i = 0; i < ADMIN_LOGIN_MAX_ATTEMPTS; i += 1) {
+    await postAdminLogin({ username, password: 'wrong-password' });
+  }
+
+  const res = await postAdminLogin({ username: username.toUpperCase(), password: 'whatever' });
+  assert.equal(res.status, 429);
+});
+
+test('a successful login resets the throttle for that username', async () => {
+  const username = 'throttle-reset-test';
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    username,
+    await hashPassword(password),
+  );
+
+  await postAdminLogin({ username, password: 'wrong-password' });
+  await postAdminLogin({ username, password: 'wrong-password' });
+  const successRes = await postAdminLogin({ username, password });
+  assert.equal(successRes.status, 302);
+
+  // Below the 5-failure threshold again right after the reset.
+  await postAdminLogin({ username, password: 'wrong-password' });
+  const stillOkRes = await postAdminLogin({ username, password });
+  assert.equal(stillOkRes.status, 302);
+});
+
+test('every POST /admin/login outcome writes one audit row with the right reason', async () => {
+  const username = 'audit-outcomes-test';
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)').run(
+    username,
+    await hashPassword(password),
+  );
+
+  await postAdminLogin({ username, password: 'wrong-password' });
+  await postAdminLogin({ username, password }); // correct password, but is_admin = 0
+
+  const rows = allAuditRows();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].action, 'login');
+  assert.equal(rows[0].outcome, 'failure');
+  assert.equal(JSON.parse(rows[0].detail).reason, 'bad_credentials');
+  assert.equal(rows[0].actor_user_id, null);
+  assert.equal(rows[1].outcome, 'failure');
+  assert.equal(JSON.parse(rows[1].detail).reason, 'not_admin');
+});
+
+test('a successful POST /admin/login audits action=login outcome=success with the real actorUserId', async () => {
+  const username = 'audit-success-test';
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const info = db
+    .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)')
+    .run(username, await hashPassword(password));
+
+  await postAdminLogin({ username, password });
+
+  const rows = allAuditRows();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, 'login');
+  assert.equal(rows[0].outcome, 'success');
+  assert.equal(rows[0].actor_user_id, Number(info.lastInsertRowid));
+});
+
+// Phase 7 — POST /admin/logout (full 5-step admin write guard)
+
+test('POST /admin/logout with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/logout`, { method: 'POST' });
+  assert.equal(res.status, 401);
+});
+
+test('POST /admin/logout with a mismatched Origin returns 403, before touching CSRF', async () => {
+  const userId = insertUser({ username: 'logout-origin-test' });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/logout`, {
+    method: 'POST',
+    headers: {
+      Cookie: `__Host-admin_session=${token}`,
+      Origin: 'https://attacker.example',
+    },
+  });
+  assert.equal(res.status, 403);
+});
+
+test('POST /admin/logout as JSON with a missing CSRF token returns 403 csrf_token_invalid', async () => {
+  const userId = insertUser({ username: 'logout-csrf-json-test' });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/logout`, {
+    method: 'POST',
+    headers: {
+      Cookie: `__Host-admin_session=${token}`,
+      Origin: `https://monitor.${DOMAIN}`,
+    },
+  });
+  assert.equal(res.status, 403);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.error, 'csrf_token_invalid');
+});
+
+test('POST /admin/logout as a form with a missing CSRF token redirects to /admin/login, cookie untouched', async () => {
+  const userId = insertUser({ username: 'logout-csrf-form-test' });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/logout`, {
+    method: 'POST',
+    headers: {
+      Cookie: `__Host-admin_session=${token}`,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({}),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/login');
+  assert.equal(res.headers.get('set-cookie'), null);
+});
+
+test('POST /admin/logout with a valid CSRF header clears the cookie and audits logout', async () => {
+  const userId = insertUser({ username: 'logout-success-json-test' });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/logout`, {
+    method: 'POST',
+    headers: {
+      Cookie: `__Host-admin_session=${token}`,
+      Origin: `https://monitor.${DOMAIN}`,
+      'X-CSRF-Token': csrf,
+    },
+  });
+  assert.equal(res.status, 200);
+  const setCookie = res.headers.get('set-cookie') ?? '';
+  assert.ok(setCookie.includes('__Host-admin_session='));
+  assert.ok(setCookie.includes('Max-Age=0'));
+
+  const rows = allAuditRows();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, 'logout');
+  assert.equal(rows[0].outcome, 'success');
+  assert.equal(rows[0].actor_user_id, userId);
+});
+
+test('POST /admin/logout as a form with a valid CSRF field redirects to /admin/login and clears the cookie', async () => {
+  const userId = insertUser({ username: 'logout-success-form-test' });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/logout`, {
+    method: 'POST',
+    headers: {
+      Cookie: `__Host-admin_session=${token}`,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/login');
+  const setCookie = res.headers.get('set-cookie') ?? '';
+  assert.ok(setCookie.includes('Max-Age=0'));
+});
+
+test('a regular (non-admin) session cookie never authenticates POST /admin/logout', async () => {
+  const userId = insertUser({ username: 'logout-regular-cookie-test' });
+  const regularToken = createSessionToken({ uid: userId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/admin/logout`, {
+    method: 'POST',
+    headers: { Cookie: `session=${regularToken}` },
+  });
+  assert.equal(res.status, 401);
 });
