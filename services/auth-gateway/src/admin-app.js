@@ -174,10 +174,19 @@ async function handlePostAdminLogin(req, res, db, config) {
   // so the real Origin can legitimately be any one of them, never the
   // apex. Accepted if it matches ANY of them (same reasoning as app.js's
   // handleLogin, generalized to more than one serving host).
+  //
+  // strict: true (D7) — deliberately diverges from credential-admin-panel's
+  // reject-on-mismatch/allow-on-absent asymmetry (app.js's handleLogin uses
+  // strict: false to keep curl/CLI login working). There is no CLI
+  // admin-login use case — provisioning and rotation are bin/admin.js —
+  // so the weaker rule buys nothing here and closes the
+  // enctype="text/plain" login-CSRF vector (R5) outright rather than
+  // partially. Every current browser sends Origin on a same-origin POST,
+  // so this costs nothing for the real zero-JS login form.
   const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
     isAcceptableOrigin(
       { origin: req.headers.origin, referer: req.headers.referer },
-      { domain: `${subdomain}.${config.domain}`, strict: false },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
     ),
   );
   if (!originOk) {

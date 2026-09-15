@@ -158,7 +158,10 @@ test('POST /admin/login with correct credentials for an is_admin user sets the a
 
   const res = await fetch(`${baseUrl}/admin/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
     body: new URLSearchParams({ username: 'jagoqui', password, next: '/monitor' }),
     redirect: 'manual',
   });
@@ -180,7 +183,10 @@ test('POST /admin/login with correct credentials for a non-admin user is rejecte
 
   const res = await fetch(`${baseUrl}/admin/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
     body: new URLSearchParams({ username: 'regular-user', password }),
     redirect: 'manual',
   });
@@ -249,6 +255,20 @@ test('POST /admin/login from a cross-site Origin is rejected before touching the
   assert.equal(res.status, 403);
 });
 
+// D7 — strict Origin: unlike the regular /login (app.js, strict: false, no
+// CLI use case here), an admin-login POST with neither Origin nor Referer
+// is rejected outright rather than allowed through.
+test('POST /admin/login with no Origin and no Referer at all is rejected (D7, strict)', async () => {
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: 'jagoqui', password: 'whatever' }),
+  });
+  assert.equal(res.status, 403);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.error, 'csrf_origin_rejected');
+});
+
 test('POST /admin/login with a wrong password is rejected with no cookie set', async () => {
   const { hashPassword } = await import('../src/tokens.js');
   const passwordHash = await hashPassword('the-real-password');
@@ -259,7 +279,10 @@ test('POST /admin/login with a wrong password is rejected with no cookie set', a
 
   const res = await fetch(`${baseUrl}/admin/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
     body: new URLSearchParams({ username: 'jagoqui', password: 'wrong-password' }),
     redirect: 'manual',
   });
@@ -278,13 +301,19 @@ function allAuditRows() {
 /**
  * POST /admin/login with a fresh URLSearchParams body every call — sending
  * one URLSearchParams instance twice silently posts an empty body the
- * second time (fetch consumes it as a stream).
+ * second time (fetch consumes it as a stream). Always carries a real
+ * monitor.{domain} Origin: strict Origin checking (D7) now rejects an
+ * absent Origin/Referer outright, so every test exercising past-the-Origin-
+ * gate behavior needs one.
  * @param {{ username: string, password: string }} creds
  */
 function postAdminLogin(creds) {
   return fetch(`${baseUrl}/admin/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
     body: new URLSearchParams(creds),
     redirect: 'manual',
   });
