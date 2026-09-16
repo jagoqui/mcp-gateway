@@ -10,11 +10,18 @@ import { verifyPassword } from './tokens.js';
 import { ADMIN_PAGE_HEADERS } from './html.js';
 import { sanitizeNext } from './login-page.js';
 import { renderAdminLoginPage } from './admin-login-page.js';
-import { renderUsersPage } from './admin-panel.js';
+import { renderUsersPage, renderTokensPage, renderTokenIssuedPage } from './admin-panel.js';
 import { isAcceptableOrigin, verifyAdminCsrfToken, issueAdminCsrfToken } from './csrf.js';
 import { createLoginThrottle } from './admin-throttle.js';
 import { recordAudit } from './admin-audit.js';
-import { listManagedUsers, createManagedUser, setManagedUserDisabled } from './user-admin.js';
+import {
+  listManagedUsers,
+  createManagedUser,
+  setManagedUserDisabled,
+  getManagedUser,
+  listTokensForUser,
+  issueManagedToken,
+} from './user-admin.js';
 
 // Every subdomain the Caddyfile carves /admin/login* out of forward_auth
 // for — keep in sync with the Caddyfile's admin-gated vhosts.
@@ -616,12 +623,171 @@ async function handlePostAdminUserDisabled(req, res, db, config, disabled) {
 }
 
 /**
+ * GET /admin/users/tokens?userId=N — one target user's token list, plus
+ * the issue-new-token form. `userId` MUST come from the query string, never
+ * a path parameter (spec's View a User's Tokens requirement). Both the
+ * shape check and the eligibility check (getManagedUser, is_admin=0) run
+ * before any rendering, so an invalid or admin-owned id never reaches
+ * listTokensForUser at all.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {URL} url
+ */
+function handleGetAdminTokens(req, res, db, url) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, {
+        Location: `/admin/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`,
+      });
+      res.end();
+      return;
+    }
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const userId = Number(url.searchParams.get('userId'));
+  if (!Number.isInteger(userId) || userId <= 0) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/admin/users?error=invalid' });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request' });
+    return;
+  }
+
+  const targetUser = getManagedUser(db, userId);
+  if (!targetUser) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/admin/users?error=not_found' });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'user_not_found' });
+    return;
+  }
+
+  const tokens = listTokensForUser(db, userId);
+  const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
+  const errorCode = url.searchParams.get('error');
+  res.writeHead(200, ADMIN_PAGE_HEADERS);
+  res.end(
+    renderTokensPage({ username: targetUser.username, userId, tokens, csrfToken, errorCode }),
+  );
+}
+
+/**
+ * POST /admin/tokens/issue — the full 5-step admin write guard, then
+ * issueManagedToken. Unlike every other admin write so far, a successful
+ * form submission renders the show-once page DIRECTLY (200), never a 302
+ * (D10: "breaking POST/Redirect/GET" on purpose) — a redirect's Location
+ * would have to carry the raw token in its query string to reach the next
+ * GET, which leaks it into Caddy access logs, browser history, and Referer.
+ * Every failure path still redirects to /admin/users, matching every other
+ * write's error convention — only the success path is special-cased.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminTokensIssue(req, res, db, config) {
+  // 1. Authenticate — cookie only.
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  // 2. Origin check — strict (D7), same reasoning as every other admin write.
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  // 3. Parse body.
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  // 4. CSRF token — header first, else the form field.
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  const csrfOk = verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret });
+  if (!csrfOk) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=csrf' });
+      res.end();
+      return;
+    }
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  // 5. Validate, then issue + audit atomically (issueManagedToken, D8) —
+  // eligibility (is_admin=0) is re-checked there too, not trusted from a
+  // separate earlier lookup.
+  const userId = Number(data?.userId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=invalid' });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const label = typeof data?.label === 'string' && data.label ? data.label : null;
+
+  const result = issueManagedToken(db, {
+    userId,
+    label,
+    actorUserId: admin.id,
+    actorLabel: admin.username,
+  });
+  if (!result) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=not_found' });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'user_not_found' });
+    return;
+  }
+
+  if (isForm) {
+    res.writeHead(200, ADMIN_PAGE_HEADERS);
+    res.end(
+      renderTokenIssuedPage({ username: result.username, userId, rawToken: result.rawToken }),
+    );
+    return;
+  }
+  sendJson(res, 200, { ok: true, rawToken: result.rawToken, tokenId: result.tokenId });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
  * /admin/verify, /admin/login (GET+POST), /admin/logout, /admin/users
- * (GET+POST), and /admin/users/disable+enable are implemented; every other
- * /admin/* path 404s until its own unit lands (Phases 10-11).
+ * (GET+POST), /admin/users/disable+enable, /admin/users/tokens (GET), and
+ * /admin/tokens/issue (POST) are implemented; every other /admin/* path
+ * 404s until its own unit lands (Phase 11).
  * The authorization boundary is always this path prefix, never
  * req.headers.host (D2) — nothing in this dispatcher or authenticateAdmin
  * ever reads Host/X-Forwarded-Host.
@@ -672,6 +838,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/users/enable') {
     await handlePostAdminUserDisabled(req, res, db, config, false);
+    return true;
+  }
+
+  if (req.method === 'GET' && pathname === '/admin/users/tokens') {
+    handleGetAdminTokens(req, res, db, url);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/tokens/issue') {
+    await handlePostAdminTokensIssue(req, res, db, config);
     return true;
   }
 

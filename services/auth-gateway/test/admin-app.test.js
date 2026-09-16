@@ -122,10 +122,10 @@ test('threat: a forged Host/X-Forwarded-Host header with no admin cookie never b
 
 // 5.5 — confirm an unrelated /admin/* path still 404s (dispatcher skeleton),
 // and every existing route on app.js is unaffected by the new branch.
-// /admin/users/tokens is Unit 10 — still genuinely unimplemented, unlike
-// /admin/users itself (Unit 8, GET/POST) below.
+// /admin/tokens/revoke is Unit 11 — still genuinely unimplemented, unlike
+// /admin/users/tokens (Unit 10, GET) below.
 test('an unimplemented /admin/* path returns 404, not a crash', async () => {
-  const res = await fetch(`${baseUrl}/admin/users/tokens`);
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, { method: 'POST' });
   assert.equal(res.status, 404);
 });
 
@@ -953,4 +953,212 @@ test('GET /admin/users renders a per-row Disable button for an active user and a
   const body = await res.text();
   assert.ok(body.includes('action="/admin/users/disable"'));
   assert.ok(body.includes('action="/admin/users/enable"'));
+});
+
+// Phase 10 — GET /admin/users/tokens + POST /admin/tokens/issue
+
+test('GET /admin/users/tokens?userId=N with no admin cookie and a non-html Accept returns 401 JSON', async () => {
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=1`, {
+    headers: { Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /admin/users/tokens?userId=N with Accept: text/html and no admin cookie redirects to /admin/login?next=…', async () => {
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=42`, {
+    headers: { Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(
+    res.headers.get('location'),
+    `/admin/login?next=${encodeURIComponent('/admin/users/tokens?userId=42')}`,
+  );
+});
+
+test("GET /admin/users/tokens lists a target user's tokens by label/created/last_used/revoked, never a raw or hashed value", async () => {
+  const { cookie } = loginAsAdmin();
+  const targetId = insertUser({ username: 'token-target', isAdmin: false });
+  db.prepare('INSERT INTO tokens (user_id, token_hash, label) VALUES (?, ?, ?)').run(
+    targetId,
+    'active-hash-value',
+    'phone',
+  );
+  db.prepare(
+    "INSERT INTO tokens (user_id, token_hash, label, revoked_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(targetId, 'revoked-hash-value', 'old-laptop');
+
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=${targetId}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Tokens for token-target'));
+  assert.ok(body.includes('phone'));
+  assert.ok(body.includes('old-laptop'));
+  assert.ok(!body.includes('active-hash-value'));
+  assert.ok(!body.includes('revoked-hash-value'));
+});
+
+test('GET /admin/users/tokens with a non-numeric userId redirects to /admin/users?error=invalid', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=not-a-number`, {
+    headers: { Cookie: cookie, Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=invalid');
+});
+
+test("GET /admin/users/tokens targeting the admin's own id redirects to /admin/users?error=not_found (A14-equivalent)", async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=${userId}`, {
+    headers: { Cookie: cookie, Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=not_found');
+});
+
+test('GET /admin/users/tokens with an unknown userId redirects to /admin/users?error=not_found', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=999999`, {
+    headers: { Cookie: cookie, Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=not_found');
+});
+
+test('GET /admin/users/tokens embeds a hidden csrf field that verifies for the caller uid', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const targetId = insertUser({ username: 'tokens-csrf-target', isAdmin: false });
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=${targetId}`, {
+    headers: { Cookie: cookie },
+  });
+  const body = await res.text();
+  const match = body.match(/name="csrf" value="([^"]+)"/);
+  assert.ok(match, 'expected a hidden csrf field');
+  const { verifyAdminCsrfToken } = await import('../src/csrf.js');
+  assert.equal(verifyAdminCsrfToken(match[1], { uid: userId, adminSecret: ADMIN_SECRET }), true);
+});
+
+test('POST /admin/tokens/issue with valid admin cookie, Origin, and CSRF renders the raw token exactly once', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const targetId = insertUser({ username: 'issue-target', isAdmin: false });
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/tokens/issue`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), label: 'ci-runner', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Copy this token now'));
+
+  const row = /** @type {any} */ (
+    db.prepare('SELECT * FROM tokens WHERE user_id = ?').get(targetId)
+  );
+  assert.equal(row.label, 'ci-runner');
+  assert.ok(!body.includes(row.token_hash));
+
+  const auditRows = db.prepare('SELECT * FROM admin_audit_log').all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'token.issue');
+});
+
+test('POST /admin/tokens/issue as JSON returns the raw token in the response body', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const targetId = insertUser({ username: 'issue-json-target', isAdmin: false });
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/tokens/issue`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ userId: targetId, csrf }),
+  });
+  assert.equal(res.status, 200);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.equal(typeof responseBody.rawToken, 'string');
+  assert.ok(responseBody.rawToken.length >= 32);
+});
+
+test("POST /admin/tokens/issue targeting the admin's own id redirects to /admin/users?error=not_found, no token row", async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/tokens/issue`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(userId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=not_found');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tokens').get().n, 0);
+});
+
+test('POST /admin/tokens/issue with a mismatched Origin returns 403, before touching the database', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const targetId = insertUser({ username: 'issue-origin-target', isAdmin: false });
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/tokens/issue`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), csrf }),
+  });
+  assert.equal(res.status, 403);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tokens').get().n, 0);
+});
+
+test('POST /admin/tokens/issue with a missing CSRF token redirects to /admin/users?error=csrf', async () => {
+  const { cookie } = loginAsAdmin();
+  const targetId = insertUser({ username: 'issue-csrf-target', isAdmin: false });
+  const res = await fetch(`${baseUrl}/admin/tokens/issue`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId) }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=csrf');
+});
+
+test('POST /admin/tokens/issue with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/tokens/issue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ userId: '1' }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test('a regular (non-admin) session cookie never authenticates GET /admin/users/tokens', async () => {
+  const targetId = insertUser({ username: 'tokens-regular-cookie-target', isAdmin: false });
+  const regularToken = createSessionToken({ uid: targetId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=${targetId}`, {
+    headers: { Cookie: `session=${regularToken}`, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
 });

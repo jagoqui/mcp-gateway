@@ -43,6 +43,7 @@ function renderUserRow(user, csrfToken) {
     <td><span class="badge">${badge}</span></td>
     <td>${user.active_token_count}</td>
     <td>${user.revoked_token_count}</td>
+    <td><a href="/admin/users/tokens?userId=${user.id}">Tokens</a></td>
     <td>${actionFormMarkup}</td>
   </tr>`;
 }
@@ -73,7 +74,7 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
   ${errorMarkup}
   <table>
     <thead>
-      <tr><th>Username</th><th>Status</th><th>Active tokens</th><th>Revoked tokens</th><th></th></tr>
+      <tr><th>Username</th><th>Status</th><th>Active tokens</th><th>Revoked tokens</th><th></th><th></th></tr>
     </thead>
     <tbody>
       ${rows}
@@ -88,4 +89,88 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
   </form>
 </main>`;
   return renderDocument({ title: 'Admin — Users', body });
+}
+
+/**
+ * One row of the tokens table — label, created_at, last_used_at, and
+ * revoked state (spec's View a User's Tokens requirement) — no token_hash
+ * or raw token column exists in `listTokensForUser`'s projection at all,
+ * so there is nothing here that could leak one even by mistake.
+ * @param {{ label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }} token
+ * @returns {string}
+ */
+function renderTokenRow(token) {
+  const badge = token.revoked_at ? 'revoked' : 'active';
+  return `<tr>
+    <td>${escapeHtml(token.label ?? '(no label)')}</td>
+    <td>${escapeHtml(token.created_at)}</td>
+    <td>${escapeHtml(token.last_used_at ?? 'never')}</td>
+    <td><span class="badge">${badge}</span></td>
+  </tr>`;
+}
+
+/**
+ * Renders the zero-JavaScript `GET /admin/users/tokens?userId=N` page: one
+ * target user's token list plus the issue-new-token form. `userId` is
+ * always the caller-resolved, already-eligibility-checked id (admin-app.js
+ * calls getManagedUser before this ever renders) — never trusted input
+ * re-echoed from the query string itself.
+ * @param {{
+ *   username: string,
+ *   userId: number,
+ *   tokens: Array<{ label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
+ *   csrfToken: string,
+ *   errorCode?: string | null,
+ * }} options
+ * @returns {string}
+ */
+export function renderTokensPage({ username, userId, tokens, csrfToken, errorCode }) {
+  const errorMessage =
+    errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
+      ? ADMIN_PANEL_ERRORS[errorCode]
+      : null;
+  const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
+  const rows = tokens.map(renderTokenRow).join('\n');
+  const body = `<main>
+  <h1>Tokens for ${escapeHtml(username)}</h1>
+  <p><a href="/admin/users">Back to users</a></p>
+  ${errorMarkup}
+  <table>
+    <thead>
+      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      ${rows}
+    </tbody>
+  </table>
+  <h2>Issue token</h2>
+  <form method="post" action="/admin/tokens/issue">
+    <input type="hidden" name="userId" value="${userId}">
+    <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+    <label>Label (optional) <input type="text" name="label" autocomplete="off"></label>
+    <button type="submit">Issue token</button>
+  </form>
+</main>`;
+  return renderDocument({ title: `Admin — Tokens for ${username}`, body });
+}
+
+/**
+ * Renders POST /admin/tokens/issue's success response directly, in place —
+ * never a redirect (D10: "breaking POST/Redirect/GET"). The show-once raw
+ * token value cannot survive a 302 without traveling in a Location query
+ * string, which would land it in Caddy access logs, browser history, and
+ * Referer; ADMIN_PAGE_HEADERS already carries Referrer-Policy: no-referrer
+ * as the second layer of that same defense. Shown exactly once — no route
+ * this change adds will ever return this value again.
+ * @param {{ username: string, userId: number, rawToken: string }} options
+ * @returns {string}
+ */
+export function renderTokenIssuedPage({ username, userId, rawToken }) {
+  const body = `<main>
+  <h1>Token issued for ${escapeHtml(username)}</h1>
+  <p class="error">Copy this token now — it will not be shown again.</p>
+  <p><code>${escapeHtml(rawToken)}</code></p>
+  <p><a href="/admin/users/tokens?userId=${userId}">Back to tokens</a></p>
+</main>`;
+  return renderDocument({ title: 'Admin — Token issued', body });
 }

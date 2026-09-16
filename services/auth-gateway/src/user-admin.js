@@ -83,6 +83,82 @@ export function issueToken(db, opts) {
 }
 
 /**
+ * Looks up one regular (is_admin=0) user by id — used to resolve the
+ * `userId` query/body parameter on every Unit 10/11 route into a real,
+ * eligible target before doing anything else with it. Returns undefined
+ * for an unknown id OR the admin's own row (never distinguishing the two
+ * to the caller, same A14 reasoning as setManagedUserDisabled's predicate).
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @returns {{ id: number, username: string, created_at: string, disabled_at: string | null } | undefined}
+ */
+export function getManagedUser(db, userId) {
+  return /** @type {any} */ (
+    db
+      .prepare(
+        'SELECT id, username, created_at, disabled_at FROM users WHERE id = ? AND is_admin = 0',
+      )
+      .get(userId)
+  );
+}
+
+/**
+ * issueToken's audited counterpart (D8, same pattern as createManagedUser/
+ * setManagedUserDisabled above) — the admin panel's POST /admin/tokens/issue
+ * uses this instead of the plain issueToken, which stays unaudited for any
+ * other caller. Unlike issueToken, this also re-validates the target
+ * user's eligibility (is_admin=0) INSIDE the same transaction as the
+ * insert — resolving `userId` into a real target is an eligibility
+ * predicate the write itself must enforce (design.md's "every write
+ * resolves its target with an ownership/eligibility predicate" rule),
+ * not something the caller can be trusted to have already checked, even
+ * though admin-app.js's handler also checks it via getManagedUser first
+ * for a nicer error path (TOCTOU is not a real concern here — better-sqlite3
+ * is synchronous and Node is single-threaded, so nothing can change the row
+ * between that check and this transaction — but re-checking here means
+ * issueManagedToken is correct even called on its own).
+ *
+ * Returns null (not throwing) when the target user doesn't exist or isn't
+ * eligible — a real, expected outcome the caller branches on, not the
+ * "something broke" case a thrown error implies.
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ userId: number, label?: string | null, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {{ rawToken: string, tokenId: number, username: string } | null}
+ */
+export function issueManagedToken(db, opts) {
+  const { userId, label = null, actorUserId, actorLabel } = opts;
+  const rawToken = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
+  const tokenHash = hashToken(rawToken);
+
+  const runTransaction = db.transaction(() => {
+    const targetUser = getManagedUser(db, userId);
+    if (!targetUser) {
+      return null;
+    }
+    const info = db
+      .prepare('INSERT INTO tokens (user_id, token_hash, label) VALUES (?, ?, ?)')
+      .run(userId, tokenHash, label);
+    const tokenId = Number(info.lastInsertRowid);
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'token.issue',
+      outcome: 'success',
+      targetUserId: userId,
+      targetTokenId: tokenId,
+      detail: label ? { label } : null,
+    });
+    return { tokenId, username: targetUser.username };
+  });
+
+  const result = runTransaction();
+  if (!result) {
+    return null;
+  }
+  return { rawToken, tokenId: result.tokenId, username: result.username };
+}
+
+/**
  * Revokes the token matching a raw token value. CLI-only (an admin operator
  * never holds a regular user's raw token). Ported verbatim from bin/admin.js
  * (D11).

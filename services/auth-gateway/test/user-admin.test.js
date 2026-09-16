@@ -6,6 +6,8 @@ import {
   createUser,
   createManagedUser,
   issueToken,
+  issueManagedToken,
+  getManagedUser,
   revokeToken,
   listManagedUsers,
   setUserDisabled,
@@ -125,6 +127,91 @@ test('issueToken generates a raw token, stores only its hash, and returns the ra
   assert.equal(rows.length, 1);
   assert.notEqual(rows[0].token_hash, rawToken);
   assert.equal(rows[0].label, 'laptop');
+  db.close();
+});
+
+// Unit 10 — getManagedUser + POST /admin/tokens/issue's audited path.
+test('getManagedUser returns the row for a regular user, and undefined for an admin row or an unknown id', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin7',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createUser(db, { username: 'helen', password: 'irrelevant' });
+
+  const found = getManagedUser(db, user.id);
+  assert.equal(found.username, 'helen');
+  assert.equal(getManagedUser(db, admin.id), undefined);
+  assert.equal(getManagedUser(db, 999999), undefined);
+  db.close();
+});
+
+test('issueManagedToken generates a raw token, stores only its hash, and audits token.issue', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin8',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createUser(db, { username: 'ivan', password: 'irrelevant' });
+
+  const result = issueManagedToken(db, {
+    userId: user.id,
+    label: 'laptop',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin8',
+  });
+  assert.ok(result);
+  assert.equal(typeof result.rawToken, 'string');
+  assert.ok(result.rawToken.length >= 32);
+  assert.equal(result.username, 'ivan');
+
+  const rows = /** @type {any[]} */ (
+    db.prepare('SELECT * FROM tokens WHERE user_id = ?').all(user.id)
+  );
+  assert.equal(rows.length, 1);
+  assert.notEqual(rows[0].token_hash, result.rawToken);
+  assert.equal(rows[0].label, 'laptop');
+
+  const auditRows = allAuditRows(db);
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'token.issue');
+  assert.equal(auditRows[0].outcome, 'success');
+  assert.equal(auditRows[0].actor_user_id, admin.id);
+  assert.equal(auditRows[0].target_user_id, user.id);
+  assert.equal(auditRows[0].target_token_id, result.tokenId);
+  assert.equal(JSON.parse(auditRows[0].detail).label, 'laptop');
+  db.close();
+});
+
+test('issueManagedToken against an unknown or admin-owned userId returns null, writes no row, no audit', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin9',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+
+  assert.equal(
+    issueManagedToken(db, {
+      userId: 999999,
+      actorUserId: admin.id,
+      actorLabel: 'root-admin9',
+    }),
+    null,
+  );
+  assert.equal(
+    issueManagedToken(db, {
+      userId: admin.id,
+      actorUserId: admin.id,
+      actorLabel: 'root-admin9',
+    }),
+    null,
+  );
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tokens').get().n, 0);
+  assert.equal(allAuditRows(db).length, 0);
   db.close();
 });
 
