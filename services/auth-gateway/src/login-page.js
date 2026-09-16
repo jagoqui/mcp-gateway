@@ -5,26 +5,31 @@ import { escapeHtml, renderDocument } from './html.js';
  * '/\\' (protocol-relative and backslash open-redirect bypasses, threat
  * matrix R1). Anything else — including a value that parses as an absolute
  * URL such as 'https://evil.example' (which does not start with '/' at
- * all) — falls back to '/credentials'. Rejects any embedded ASCII tab,
- * carriage return, or line feed outright: the WHATWG URL parser strips
- * those characters before scheme/host resolution, so a value like
- * '/\t/evil.example' would otherwise pass this prefix check unmodified and
- * be re-parsed by the browser as the protocol-relative '//evil.example'.
+ * all) — falls back to `fallback` (default '/credentials', the regular
+ * user panel; admin-login-page.js passes '/admin/users' instead, so an
+ * admin landing on /admin/login with no explicit `next` — the common case,
+ * just typing the URL — lands on the admin panel, not the regular one).
+ * Rejects any embedded ASCII tab, carriage return, or line feed outright:
+ * the WHATWG URL parser strips those characters before scheme/host
+ * resolution, so a value like '/\t/evil.example' would otherwise pass this
+ * prefix check unmodified and be re-parsed by the browser as the
+ * protocol-relative '//evil.example'.
  * @param {unknown} raw
+ * @param {string} [fallback]
  * @returns {string}
  */
-export function sanitizeNext(raw) {
+export function sanitizeNext(raw, fallback = '/credentials') {
   if (typeof raw !== 'string' || raw.length === 0) {
-    return '/credentials';
+    return fallback;
   }
   if (/[\t\r\n]/.test(raw)) {
-    return '/credentials';
+    return fallback;
   }
   if (!raw.startsWith('/')) {
-    return '/credentials';
+    return fallback;
   }
   if (raw.startsWith('//') || raw.startsWith('/\\')) {
-    return '/credentials';
+    return fallback;
   }
   return raw;
 }

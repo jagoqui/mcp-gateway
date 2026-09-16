@@ -7,7 +7,7 @@ import {
 } from './admin-session.js';
 import { wantsHtml } from './verify.js';
 import { verifyPassword } from './tokens.js';
-import { ADMIN_PAGE_HEADERS } from './html.js';
+import { PAGE_HEADERS, ADMIN_PAGE_HEADERS } from './html.js';
 import { sanitizeNext } from './login-page.js';
 import { renderAdminLoginPage } from './admin-login-page.js';
 import { renderUsersPage, renderTokensPage, renderTokenIssuedPage } from './admin-panel.js';
@@ -140,24 +140,39 @@ function handleAdminVerify(req, res, db) {
 /**
  * GET /admin/login — the zero-JS login form, unauthenticated. `next` comes
  * straight from the query string; renderAdminLoginPage sanitizes it.
+ *
+ * Deliberately PAGE_HEADERS, not ADMIN_PAGE_HEADERS — spec's Strict
+ * Security Headers requirement lists exactly 3 headers for this page (CSP,
+ * Cache-Control: no-store, X-Content-Type-Options: nosniff), never
+ * Referrer-Policy. Confirmed live (2026-09-16): Referrer-Policy:
+ * no-referrer on this page made Chrome send Origin: null on the login
+ * form's top-level POST navigation — a known Chromium behavior tying a
+ * navigation's Origin header to the page's referrer policy (fetch/XHR are
+ * unaffected) — which isAcceptableOrigin then correctly rejects as an
+ * opaque origin (A6/R5), 403ing every real browser login. No secret is
+ * ever rendered on this page, so Referrer-Policy bought nothing here in
+ * the first place; ADMIN_PAGE_HEADERS stays on the authenticated pages
+ * below, where it protects real data in the URL/history.
  * @param {import('node:http').ServerResponse} res
  * @param {URL} url
  */
 function handleGetAdminLogin(res, url) {
   const next = url.searchParams.get('next');
-  res.writeHead(200, ADMIN_PAGE_HEADERS);
+  res.writeHead(200, PAGE_HEADERS);
   res.end(renderAdminLoginPage({ next }));
 }
 
 /**
  * Re-renders the admin login page as a failure response — mirrors
  * app.js's sendLoginFailure exactly, against the admin page instead.
+ * PAGE_HEADERS, not ADMIN_PAGE_HEADERS — same reasoning as
+ * handleGetAdminLogin above.
  * @param {import('node:http').ServerResponse} res
  * @param {number} status
  * @param {{ next?: unknown, username?: unknown, error: string }} options
  */
 function sendAdminLoginFailure(res, status, { next, username, error }) {
-  res.writeHead(status, ADMIN_PAGE_HEADERS);
+  res.writeHead(status, PAGE_HEADERS);
   res.end(renderAdminLoginPage({ next, error, username }));
 }
 
@@ -310,7 +325,11 @@ async function handlePostAdminLogin(req, res, db, config) {
   res.setHeader('Set-Cookie', serializeAdminSessionCookie(token));
 
   if (isForm) {
-    res.writeHead(302, { Location: sanitizeNext(next) });
+    // '/admin/users' fallback, not sanitizeNext's default '/credentials' —
+    // must match the hidden `next` field renderAdminLoginPage rendered on
+    // the form the admin just submitted, or a plain admin/login with no
+    // explicit next lands them on the wrong panel after a successful login.
+    res.writeHead(302, { Location: sanitizeNext(next, '/admin/users') });
     res.end();
     return;
   }

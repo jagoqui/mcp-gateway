@@ -148,6 +148,46 @@ test('GET /admin/login preserves and escapes the next param', async () => {
   assert.ok(!body.includes('<script>'));
 });
 
+// Regression (found live on the VPS, 2026-09-16): admin-login-page.js's
+// renderAdminLoginPage imports sanitizeNext from login-page.js, whose
+// default fallback is '/credentials' (the REGULAR user panel) — an admin
+// landing on /admin/login directly with no ?next= (the common case) was
+// getting a hidden `next` field of '/credentials', not '/admin/users'.
+test('GET /admin/login with no next param defaults the hidden next field to /admin/users, not /credentials', async () => {
+  const res = await fetch(`${baseUrl}/admin/login`);
+  const body = await res.text();
+  assert.ok(body.includes('name="next" value="/admin/users"'));
+});
+
+// Regression (found live on the VPS, 2026-09-16): GET/POST /admin/login
+// must NOT carry Referrer-Policy: no-referrer. Chrome ties a top-level
+// navigation's Origin header to the page's referrer policy — with
+// no-referrer set, it sends Origin: null on the login form's POST instead
+// of the real same-origin value, which isAcceptableOrigin correctly (and
+// unavoidably) rejects as an opaque origin (A6/R5), 403ing every real
+// browser login. No secret is ever rendered on this page, so
+// Referrer-Policy bought nothing here — only the authenticated pages
+// (users/tokens) keep it.
+test('GET /admin/login carries CSP/no-store/nosniff but NOT Referrer-Policy', async () => {
+  const res = await fetch(`${baseUrl}/admin/login`);
+  assert.ok(res.headers.get('content-security-policy'));
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(res.headers.get('referrer-policy'), null);
+});
+
+test('POST /admin/login failure response does not carry Referrer-Policy either', async () => {
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
+    body: new URLSearchParams({ username: 'nobody', password: 'wrong' }),
+  });
+  assert.equal(res.headers.get('referrer-policy'), null);
+});
+
 // engram-unified-console Unit 1 — POST /admin/login
 
 test('POST /admin/login with correct credentials for an is_admin user sets the admin cookie and redirects', async () => {
@@ -173,6 +213,33 @@ test('POST /admin/login with correct credentials for an is_admin user sets the a
   assert.equal(res.headers.get('location'), '/monitor');
   const setCookie = res.headers.get('set-cookie') ?? '';
   assert.ok(setCookie.includes('__Host-admin_session='));
+});
+
+// Regression (found live on the VPS, 2026-09-16): same bug as the GET
+// /admin/login test above, on the POST success redirect this time — a real
+// admin login with no next field (the common case) was landing on
+// /credentials instead of /admin/users.
+test('POST /admin/login with no next field redirects to /admin/users, not /credentials', async () => {
+  const password = 'correct-horse-battery-staple';
+  const { hashPassword } = await import('../src/tokens.js');
+  const passwordHash = await hashPassword(password);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    'kellan',
+    passwordHash,
+  );
+
+  const res = await fetch(`${baseUrl}/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: `https://monitor.${DOMAIN}`,
+    },
+    body: new URLSearchParams({ username: 'kellan', password }),
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users');
 });
 
 test('POST /admin/login with correct credentials for a non-admin user is rejected with the same generic failure as a wrong password', async () => {

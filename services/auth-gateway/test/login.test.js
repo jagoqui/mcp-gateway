@@ -148,6 +148,21 @@ test('sanitizeNext accepts a safe single-leading-slash path unchanged', () => {
   assert.equal(sanitizeNext('/foo/bar?x=1'), '/foo/bar?x=1');
 });
 
+// admin-login-page.js passes '/admin/users' here instead of relying on the
+// default — every rejection path must honor the caller's own fallback, not
+// silently fall back to '/credentials' regardless of what was asked for.
+test('sanitizeNext honors a caller-supplied fallback instead of the default /credentials', () => {
+  assert.equal(sanitizeNext(undefined, '/admin/users'), '/admin/users');
+  assert.equal(sanitizeNext('', '/admin/users'), '/admin/users');
+  assert.equal(sanitizeNext('//evil.example', '/admin/users'), '/admin/users');
+  assert.equal(sanitizeNext('https://evil.example', '/admin/users'), '/admin/users');
+  // A valid next still wins over any fallback, admin or not.
+  assert.equal(
+    sanitizeNext('/admin/users/tokens?userId=5', '/admin/users'),
+    '/admin/users/tokens?userId=5',
+  );
+});
+
 // --- GET /login ---
 
 test('GET /login renders a 200 html form with no <script> and the required security headers', async () => {
