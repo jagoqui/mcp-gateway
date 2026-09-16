@@ -157,6 +157,25 @@ engram-cloud.{$DOMAIN:jagoqui.tech} {
 		reverse_proxy engram-monitor:80
 	}
 
+	# Bare root only (exact match — does not shadow /dashboard below, which
+	# stays reachable for anyone who explicitly wants Engram Cloud's own raw
+	# UI). Redirects an authenticated visit straight to the admin panel
+	# instead of Cloud's own /dashboard (which needs its own separate,
+	# unimplemented-SSO login — see the block comment above).
+	handle / {
+		# route{} disables Caddy's default directive-priority sort — without
+		# it, redir always runs BEFORE forward_auth/reverse_proxy regardless
+		# of source order (confirmed live via `caddy adapt`'s compiled JSON:
+		# the redirect fired unconditionally, unauthenticated included).
+		route {
+			forward_auth auth-gateway:3000 {
+				uri /admin/verify
+				import strip_gateway_headers
+			}
+			redir * /admin/users
+		}
+	}
+
 	handle {
 		forward_auth auth-gateway:3000 {
 			uri /admin/verify
