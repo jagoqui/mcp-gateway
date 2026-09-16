@@ -46,6 +46,9 @@ button{font:inherit;padding:.5rem 1rem;border-radius:4px;border:1px solid curren
 .danger{margin-top:.75rem;opacity:.8}
 .error{border:1px solid currentColor;padding:.5rem .75rem;border-radius:4px;margin:0 0 1rem}
 .note{margin:0;font-size:.9rem;opacity:.75}
+.nav{display:flex;flex-wrap:wrap;align-items:center;gap:1rem;margin:0 0 1.5rem;font-size:.9rem}
+.nav form{margin:0}
+.nav button{padding:.25rem .75rem}
 `.trim();
 
 /**

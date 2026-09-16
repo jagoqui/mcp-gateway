@@ -500,7 +500,7 @@ async function handlePostAdminUsers(req, res, db, config) {
   }
 
   // 5. Validate, then create + audit atomically (createManagedUser, D8).
-  const { username, password } = data ?? {};
+  const { username, password, passwordConfirm } = data ?? {};
   if (typeof username !== 'string' || !username || typeof password !== 'string' || !password) {
     if (isForm) {
       res.writeHead(302, { Location: '/admin/users?error=invalid' });
@@ -508,6 +508,15 @@ async function handlePostAdminUsers(req, res, db, config) {
       return;
     }
     sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  // The zero-JS form always submits passwordConfirm (renderUsersPage);
+  // a non-form/JSON caller has no such field to fill in and isn't asked
+  // for one — only the form path enforces the match.
+  if (isForm && password !== passwordConfirm) {
+    res.writeHead(302, { Location: '/admin/users?error=mismatch' });
+    res.end();
     return;
   }
 

@@ -636,6 +636,18 @@ test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/no-referre
   assert.ok(!body.includes('<script'));
 });
 
+// Found live (2026-09-16): POST /admin/logout has existed since Unit 7,
+// but no rendered page ever offered a way to trigger it, nor a way to
+// reach /dashboard or /monitor without leaving the admin panel first.
+test('GET /admin/users renders a nav with Users/Dashboard/Monitor links and a Log out form', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('href="/dashboard"'));
+  assert.ok(body.includes('href="/monitor"'));
+  assert.ok(body.includes('action="/admin/logout"'));
+});
+
 test('GET /admin/users lists only is_admin=0 users, with disabled state and token counts, never admin rows', async () => {
   const { cookie } = loginAsAdmin();
   const regularId = insertUser({ username: 'regular-listed', isAdmin: false });
@@ -693,7 +705,12 @@ test('POST /admin/users with valid admin cookie, Origin, and CSRF creates an is_
       Origin: `https://monitor.${DOMAIN}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: new URLSearchParams({ username: 'brand-new-user', password: 'a-strong-password', csrf }),
+    body: new URLSearchParams({
+      username: 'brand-new-user',
+      password: 'a-strong-password',
+      passwordConfirm: 'a-strong-password',
+      csrf,
+    }),
     redirect: 'manual',
   });
   assert.equal(res.status, 302);
@@ -719,6 +736,7 @@ test('POST /admin/users cannot set is_admin via the body — a spoofed isAdmin f
     body: new URLSearchParams({
       username: 'spoofed-admin-attempt',
       password: 'a-strong-password',
+      passwordConfirm: 'a-strong-password',
       isAdmin: 'true',
       csrf,
     }),
@@ -741,7 +759,12 @@ test('POST /admin/users with a duplicate username redirects to /admin/users?erro
       Origin: `https://monitor.${DOMAIN}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: new URLSearchParams({ username: 'already-taken', password: 'a-strong-password', csrf }),
+    body: new URLSearchParams({
+      username: 'already-taken',
+      password: 'a-strong-password',
+      passwordConfirm: 'a-strong-password',
+      csrf,
+    }),
     redirect: 'manual',
   });
   assert.equal(res.status, 302);
@@ -750,6 +773,45 @@ test('POST /admin/users with a duplicate username redirects to /admin/users?erro
     db.prepare('SELECT COUNT(*) AS n FROM users WHERE username = ?').get('already-taken')
   ).n;
   assert.equal(count, 1);
+});
+
+test('POST /admin/users with a password/passwordConfirm mismatch redirects to /admin/users?error=mismatch, no row created', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      username: 'mismatch-attempt',
+      password: 'a-strong-password',
+      passwordConfirm: 'a-different-password',
+      csrf,
+    }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=mismatch');
+  const row = db.prepare('SELECT * FROM users WHERE username = ?').get('mismatch-attempt');
+  assert.equal(row, undefined);
+});
+
+test('POST /admin/users as JSON is not required to send passwordConfirm', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ username: 'json-caller-user', password: 'a-strong-password', csrf }),
+  });
+  assert.equal(res.status, 200);
 });
 
 test('POST /admin/users with a missing password redirects to /admin/users?error=invalid', async () => {
@@ -824,6 +886,7 @@ test('a successful POST /admin/users writes one user.create audit row', async ()
     body: new URLSearchParams({
       username: 'audited-new-user',
       password: 'a-strong-password',
+      passwordConfirm: 'a-strong-password',
       csrf,
     }),
   });
@@ -1061,6 +1124,9 @@ test("GET /admin/users/tokens lists a target user's tokens by label/created/last
   });
   assert.equal(res.status, 200);
   const body = await res.text();
+  assert.ok(body.includes('href="/dashboard"'));
+  assert.ok(body.includes('href="/monitor"'));
+  assert.ok(body.includes('action="/admin/logout"'));
   assert.ok(body.includes('Tokens for token-target'));
   assert.ok(body.includes('phone'));
   assert.ok(body.includes('old-laptop'));

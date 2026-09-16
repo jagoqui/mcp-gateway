@@ -12,7 +12,31 @@ export const ADMIN_PANEL_ERRORS = Object.freeze({
   duplicate: 'That username is already taken.',
   csrf: 'Your page expired. Reload and try again.',
   not_found: 'That user could not be found.',
+  mismatch: 'Password and confirmation must match.',
 });
+
+/**
+ * Shared nav for every authenticated admin page: back to Users, cross-links
+ * to /dashboard (Engram Cloud's own UI) and /monitor (engram-monitor) —
+ * both already reachable from here without a second login, since they sit
+ * behind the SAME admin session on this same host (single perimeter,
+ * single login) — and a Log out form reusing the page's own admin CSRF
+ * token (same uid, same admin CSRF domain — no separate token issuance
+ * needed for it).
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderAdminNav(csrfToken) {
+  return `<nav class="nav">
+  <a href="/admin/users">Users</a>
+  <a href="/dashboard">Engram Cloud dashboard</a>
+  <a href="/monitor">Monitor</a>
+  <form method="post" action="/admin/logout">
+    <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+    <button type="submit">Log out</button>
+  </form>
+</nav>`;
+}
 
 /**
  * One row of the users table, plus its disable/enable form (Unit 9) —
@@ -70,6 +94,7 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
   const rows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
   const body = `<main>
+  ${renderAdminNav(csrfToken)}
   <h1>Users</h1>
   ${errorMarkup}
   <table>
@@ -85,6 +110,7 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
     <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
     <label>Username <input type="text" name="username" required autofocus autocomplete="off"></label>
     <label>Password <input type="password" name="password" required autocomplete="new-password"></label>
+    <label>Confirm password <input type="password" name="passwordConfirm" required autocomplete="new-password"></label>
     <button type="submit">Create user</button>
   </form>
 </main>`;
@@ -154,6 +180,7 @@ export function renderTokensPage({ username, userId, tokens, csrfToken, errorCod
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
   const rows = tokens.map((token) => renderTokenRow(token, userId, csrfToken)).join('\n');
   const body = `<main>
+  ${renderAdminNav(csrfToken)}
   <h1>Tokens for ${escapeHtml(username)}</h1>
   <p><a href="/admin/users">Back to users</a></p>
   ${errorMarkup}
