@@ -46,6 +46,18 @@ services:
       ATLASSIAN_ENC_KEY: ${ATLASSIAN_ENC_KEY}
       AUTH_GATEWAY_SESSION_SECRET: ${AUTH_GATEWAY_SESSION_SECRET}
       AUTH_GATEWAY_ADMIN_SESSION_SECRET: ${AUTH_GATEWAY_ADMIN_SESSION_SECRET}
+      # Same legacy admin fallback token already provisioned for the
+      # engram-cloud service itself below (engram cloud serve's own
+      # ENGRAM_CLOUD_ADMIN env var) — reused here as the Bearer credential
+      # for real admin privileges (create user, grant project, issue
+      # token), distinct from ENGRAM_CLOUD_TOKEN, which engram-router/
+      # engram-serve only use for sync-anything, never admin actions.
+      # Confirmed via deepwiki against engram's own source: the server
+      # accepts either ENGRAM_CLOUD_TOKEN or ENGRAM_CLOUD_ADMIN as a
+      # legacy fallback Bearer value — no new secret needed. See
+      # services/auth-gateway/src/engram-cloud-client.js.
+      ENGRAM_CLOUD_ADMIN: ${ENGRAM_CLOUD_ADMIN}
+      ENGRAM_CLOUD_SERVER: http://engram-cloud:18080
     volumes:
       - auth_gateway_data:/data
     networks:

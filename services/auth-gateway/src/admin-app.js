@@ -24,6 +24,12 @@ import {
   revokeManagedToken,
   regenerateToken,
 } from './user-admin.js';
+import {
+  listUsers as listEngramCloudUsers,
+  createUser as createEngramCloudUser,
+  grantProject as grantEngramCloudProject,
+  issueToken as issueEngramCloudToken,
+} from './engram-cloud-client.js';
 
 // Every subdomain the Caddyfile carves /admin/login* out of forward_auth
 // for — keep in sync with the Caddyfile's admin-gated vhosts.
@@ -1012,6 +1018,181 @@ async function handlePostAdminTokensRegenerate(req, res, db, config) {
 }
 
 /**
+ * Shared steps 1-4 for every /admin/engram-cloud/* write: authenticate,
+ * strict Origin (D7), parse body, verify CSRF. These routes are a pure
+ * JSON relay for Monitor's own SPA (Phase 4, external repo — see
+ * design.md's Migration/Rollout) — never a zero-JS form — so the CSRF
+ * token always arrives via the X-CSRF-Token header. GET
+ * /admin/engram-cloud/users hands one out fresh on every response for the
+ * SPA to reuse on subsequent writes, the JSON-response equivalent of every
+ * other admin page's hidden csrf field.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ * @returns {Promise<{ admin: any, data: Record<string, any> } | null>}
+ */
+async function beginEngramCloudWrite(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return null;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return null;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return null;
+  }
+
+  const csrfToken =
+    /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? body.data?.csrf;
+  const csrfOk = verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret });
+  if (!csrfOk) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return null;
+  }
+
+  return { admin, data: body.data };
+}
+
+/**
+ * Calls into engram-cloud-client.js and relays its result — a 502 on any
+ * failure. engram-cloud-client.js's own thrown errors never include the
+ * admin token (verified by its own test suite), but this catch is also
+ * the backstop against a raw stack trace or unexpected shape ever
+ * reaching the response body (design.md's "Engram Cloud admin token
+ * exposure" threat row).
+ * @param {import('node:http').ServerResponse} res
+ * @param {() => Promise<any>} fn
+ * @param {number} [successStatus]
+ */
+async function relayEngramCloudCall(res, fn, successStatus = 200) {
+  /** @type {any} */
+  let result;
+  try {
+    result = await fn();
+  } catch {
+    sendJson(res, 502, { error: 'engram_cloud_unreachable' });
+    return;
+  }
+  sendJson(res, successStatus, result);
+}
+
+/**
+ * GET /admin/engram-cloud/users — relays engram-cloud's own managed-user
+ * list.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ */
+async function handleGetEngramCloudUsers(req, res, db) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  /** @type {any} */
+  let users;
+  try {
+    users = await listEngramCloudUsers();
+  } catch {
+    sendJson(res, 502, { error: 'engram_cloud_unreachable' });
+    return;
+  }
+
+  const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
+  sendJson(res, 200, { csrfToken, users });
+}
+
+/**
+ * POST /admin/engram-cloud/users — relays a managed-user creation.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostEngramCloudUsers(req, res, db, config) {
+  const begun = await beginEngramCloudWrite(req, res, db, config);
+  if (!begun) {
+    return;
+  }
+  const { username, email, displayName, role } = begun.data ?? {};
+  if (typeof username !== 'string' || !username) {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  await relayEngramCloudCall(
+    res,
+    () => createEngramCloudUser({ username, email, displayName, role }),
+    201,
+  );
+}
+
+/**
+ * POST /admin/engram-cloud/users/:id/grants — relays a project grant.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ * @param {string} principalId
+ */
+async function handlePostEngramCloudGrant(req, res, db, config, principalId) {
+  const begun = await beginEngramCloudWrite(req, res, db, config);
+  if (!begun) {
+    return;
+  }
+  const { project } = begun.data ?? {};
+  if (typeof project !== 'string' || !project) {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  await relayEngramCloudCall(res, () => grantEngramCloudProject({ principalId, project }), 201);
+}
+
+/**
+ * POST /admin/engram-cloud/users/:id/tokens — relays a show-once token
+ * issuance. No D10 direct-render treatment needed here (unlike this
+ * service's own /admin/tokens/issue) — the caller is a JSON API client
+ * (Monitor's SPA), never a browser form navigation, so there is no
+ * redirect/Location leak vector to defend against.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ * @param {string} principalId
+ */
+async function handlePostEngramCloudToken(req, res, db, config, principalId) {
+  const begun = await beginEngramCloudWrite(req, res, db, config);
+  if (!begun) {
+    return;
+  }
+  const { name } = begun.data ?? {};
+  await relayEngramCloudCall(
+    res,
+    () => issueEngramCloudToken({ principalId, name: typeof name === 'string' ? name : undefined }),
+    201,
+  );
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
@@ -1087,6 +1268,40 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/tokens/regenerate') {
     await handlePostAdminTokensRegenerate(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'GET' && pathname === '/admin/engram-cloud/users') {
+    await handleGetEngramCloudUsers(req, res, db);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/engram-cloud/users') {
+    await handlePostEngramCloudUsers(req, res, db, config);
+    return true;
+  }
+
+  const engramCloudGrantMatch = pathname.match(/^\/admin\/engram-cloud\/users\/([^/]+)\/grants$/);
+  if (req.method === 'POST' && engramCloudGrantMatch) {
+    await handlePostEngramCloudGrant(
+      req,
+      res,
+      db,
+      config,
+      decodeURIComponent(engramCloudGrantMatch[1]),
+    );
+    return true;
+  }
+
+  const engramCloudTokenMatch = pathname.match(/^\/admin\/engram-cloud\/users\/([^/]+)\/tokens$/);
+  if (req.method === 'POST' && engramCloudTokenMatch) {
+    await handlePostEngramCloudToken(
+      req,
+      res,
+      db,
+      config,
+      decodeURIComponent(engramCloudTokenMatch[1]),
+    );
     return true;
   }
 

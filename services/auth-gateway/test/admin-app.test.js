@@ -7,6 +7,7 @@ import { createAdminSessionToken } from '../src/admin-session.js';
 import { createSessionToken } from '../src/session.js';
 import { issueAdminCsrfToken } from '../src/csrf.js';
 import { ADMIN_LOGIN_MAX_ATTEMPTS } from '../src/admin-throttle.js';
+import http from 'node:http';
 
 const DOMAIN = 'test.example';
 const SESSION_SECRET = 'test-session-secret';
@@ -1647,4 +1648,223 @@ test('GET /admin/users/tokens renders a per-row Revoke/Regenerate form for an ac
   assert.ok(body.includes('action="/admin/tokens/regenerate"'));
   // Exactly one active token → exactly one Revoke form, none for the revoked one.
   assert.equal(body.split('action="/admin/tokens/revoke"').length - 1, 1);
+});
+
+// Phase 3 (engram-unified-console) — /admin/engram-cloud/* proxy routes.
+// Unlike every other admin route above, these are a pure JSON relay for
+// Monitor's own SPA (Phase 4, external repo) to call — no HTML rendering,
+// no zero-JS form. ENGRAM_CLOUD_ADMIN/ENGRAM_CLOUD_SERVER point at a
+// local stub server standing in for `engram cloud serve` itself.
+
+const ENGRAM_CLOUD_ADMIN = 'test-engram-cloud-admin-token';
+
+/** @type {http.Server} */
+let engramCloudStub;
+/** @type {{ method?: string, url?: string, headers?: any, body?: string }} */
+let lastEngramCloudRequest;
+/** @type {{ status: number, body: any }} */
+let nextEngramCloudResponse;
+
+before(() => {
+  process.env.ENGRAM_CLOUD_ADMIN = ENGRAM_CLOUD_ADMIN;
+});
+
+beforeEach(async () => {
+  lastEngramCloudRequest = undefined;
+  nextEngramCloudResponse = { status: 200, body: {} };
+  engramCloudStub = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => {
+      lastEngramCloudRequest = {
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body: raw,
+      };
+      res.writeHead(nextEngramCloudResponse.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(nextEngramCloudResponse.body));
+    });
+  });
+  await new Promise((resolve) => engramCloudStub.listen(0, '127.0.0.1', resolve));
+  const address = /** @type {any} */ (engramCloudStub.address());
+  process.env.ENGRAM_CLOUD_SERVER = `http://127.0.0.1:${address.port}`;
+});
+
+afterEach(async () => {
+  await new Promise((resolve) => engramCloudStub.close(resolve));
+});
+
+test('GET /admin/engram-cloud/users with no admin cookie returns 401, stub never hit', async () => {
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    headers: { Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('GET /admin/engram-cloud/users relays the list and includes a fresh csrfToken for subsequent writes', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  nextEngramCloudResponse = {
+    status: 200,
+    body: [{ principal_id: 'p1', username: 'alice', role: 'member' }],
+  };
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.deepEqual(responseBody.users, [{ principal_id: 'p1', username: 'alice', role: 'member' }]);
+  assert.equal(typeof responseBody.csrfToken, 'string');
+  const { verifyAdminCsrfToken } = await import('../src/csrf.js');
+  assert.equal(
+    verifyAdminCsrfToken(responseBody.csrfToken, { uid: userId, adminSecret: ADMIN_SECRET }),
+    true,
+  );
+  assert.equal(lastEngramCloudRequest.url, '/admin/users');
+});
+
+test('POST /admin/engram-cloud/users with no admin cookie returns 401, stub never hit', async () => {
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'bob' }),
+  });
+  assert.equal(res.status, 401);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('POST /admin/engram-cloud/users with valid admin cookie, Origin, and CSRF relays the create call and its response', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  nextEngramCloudResponse = {
+    status: 201,
+    body: { principal_id: 'p2', username: 'bob', role: 'member', enabled: true },
+  };
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrf,
+    },
+    body: JSON.stringify({ username: 'bob', role: 'member' }),
+  });
+  assert.equal(res.status, 201);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.equal(responseBody.principal_id, 'p2');
+  assert.equal(lastEngramCloudRequest.method, 'POST');
+  assert.equal(lastEngramCloudRequest.url, '/admin/users');
+  assert.equal(lastEngramCloudRequest.headers.authorization, `Bearer ${ENGRAM_CLOUD_ADMIN}`);
+  assert.deepEqual(JSON.parse(lastEngramCloudRequest.body), { username: 'bob', role: 'member' });
+});
+
+test('POST /admin/engram-cloud/users with a mismatched Origin returns 403, stub never hit', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrf,
+    },
+    body: JSON.stringify({ username: 'bob' }),
+  });
+  assert.equal(res.status, 403);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('POST /admin/engram-cloud/users with a missing CSRF token returns 403, stub never hit', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ username: 'bob' }),
+  });
+  assert.equal(res.status, 403);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('POST /admin/engram-cloud/users/:id/grants relays the grant call with the URL-encoded id and project body', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  nextEngramCloudResponse = {
+    status: 201,
+    body: { principal_id: 'p2', project: 'acme', granted_by_principal_id: 'p1' },
+  };
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users/p2/grants`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrf,
+    },
+    body: JSON.stringify({ project: 'acme' }),
+  });
+  assert.equal(res.status, 201);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.equal(responseBody.project, 'acme');
+  assert.equal(lastEngramCloudRequest.url, '/admin/users/p2/grants');
+  assert.deepEqual(JSON.parse(lastEngramCloudRequest.body), { project: 'acme' });
+});
+
+test('POST /admin/engram-cloud/users/:id/tokens relays the issued raw_token exactly once', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  nextEngramCloudResponse = {
+    status: 201,
+    body: { raw_token: 'shown-once-value', token: { id: 't1', principal_id: 'p2' } },
+  };
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users/p2/tokens`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrf,
+    },
+    body: JSON.stringify({ name: 'laptop' }),
+  });
+  assert.equal(res.status, 201);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.equal(responseBody.raw_token, 'shown-once-value');
+  assert.equal(lastEngramCloudRequest.url, '/admin/users/p2/tokens');
+});
+
+test('POST /admin/engram-cloud/users/:id/tokens with no admin cookie returns 401, stub never hit', async () => {
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users/p2/tokens`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 401);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('a regular (non-admin) session cookie never authenticates GET /admin/engram-cloud/users', async () => {
+  const regularId = insertUser({ username: 'engram-cloud-regular-cookie-test', isAdmin: false });
+  const regularToken = createSessionToken({ uid: regularId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    headers: { Cookie: `session=${regularToken}`, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('when the upstream engram-cloud call fails, the proxy route surfaces a 502, never a raw stack trace', async () => {
+  const { cookie } = loginAsAdmin();
+  await engramCloudStub.close();
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 502);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.ok(!JSON.stringify(responseBody).includes(ENGRAM_CLOUD_ADMIN));
+  // afterEach's own engramCloudStub.close() on an already-closed server is a
+  // harmless no-op (Node's http.Server.close() tolerates a double-close).
 });
