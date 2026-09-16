@@ -131,6 +131,21 @@ engram-cloud.{$DOMAIN:jagoqui.tech} {
 		reverse_proxy auth-gateway:3000
 	}
 
+	# admin-users-panel's Unit 8-11 routes (users list/create,
+	# disable/enable, token list/issue/revoke/regenerate) — everything
+	# under /admin/* except /admin/login* above. Without this block they'd
+	# fall into the catch-all below and hit engram-cloud:18080, which has
+	# no idea what /admin/users means. GET /admin/verify itself needs no
+	# entry here — forward_auth calls it as an internal subrequest, never
+	# a publicly routed path.
+	handle /admin/* {
+		forward_auth auth-gateway:3000 {
+			uri /admin/verify
+			import strip_gateway_headers
+		}
+		reverse_proxy auth-gateway:3000
+	}
+
 	# Full path forwarded as-is (no stripping) — engram-monitor's own
 	# nginx.conf matches on /monitor/* directly, since its build already
 	# has that same prefix baked into every asset reference.

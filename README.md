@@ -78,6 +78,13 @@ Admin users and tokens are managed with `bin/admin.js` inside the
 # create a user (prompts for username/password if flags omitted)
 docker compose exec auth-gateway node bin/admin.js create-user --username alice
 
+# provision the single admin account (--admin true) — see "Admin users
+# panel" below; there is no separate promote-to-admin command
+docker compose exec auth-gateway node bin/admin.js create-user --username root --admin true
+
+# rotate a password (admin or regular user) — never via the browser panel
+docker compose exec auth-gateway node bin/admin.js set-password --username alice
+
 # issue a Bearer token for that user — shown ONCE, copy it immediately
 docker compose exec auth-gateway node bin/admin.js issue-token --username alice
 
@@ -117,6 +124,32 @@ panel automatically. Cookie-authenticated writes on this page carry a
 stateless, per-session CSRF token; `Authorization: Bearer` clients (CLI/MCP)
 are unaffected — CSRF only applies to the cookie-authenticated browser path.
 
+## Admin users panel
+
+`https://engram-cloud.{$DOMAIN}/admin/users` is a second, fully independent
+zero-JavaScript panel for the single CLI-provisioned admin account (`bin/admin.js
+create-user --admin true`, above) to manage regular users and their tokens without
+VPS shell access. It shares no session with `/credentials`: sign in at
+`/admin/login` with a `__Host-admin_session` cookie, distinct from the regular
+`session` cookie and CSRF-scoped separately from it.
+
+From this panel you can list every regular user (with active/revoked token
+counts), create one, disable/enable one (leaving their tokens untouched), and per
+user, view/issue/revoke/regenerate their tokens — a newly issued or regenerated
+token is shown exactly once, on that same response, never again afterward. The
+admin account itself is out of scope by design: there is no create-admin,
+list-admin, or self-disable action anywhere in this panel, and no `Authorization:
+Bearer` credential is ever accepted here, even one belonging to the admin — only
+the admin session cookie authenticates it. Every write here also appends one row
+to `admin_audit_log` (actor, action, target, timestamp) — there is no UI for it
+yet; query it directly against the `auth-gateway` SQLite database if you need the
+trail.
+
+Login attempts throttle after 5 failures for one username within a 15-minute
+window (429 on the 6th, even with the correct password) — the escape hatch for a
+locked-out admin is `bin/admin.js set-password` (bypasses HTTP entirely) or
+restarting the `auth-gateway` container (clears the in-memory throttle map).
+
 ## Environment variables
 
 Every variable is documented inline in [`.env.example`](.env.example),
@@ -128,6 +161,7 @@ grouped by service. Copy it to `.env` (gitignored) and fill in real values;
 | `DOMAIN` | Base domain; the `auth.` subdomain and `/mcp/*` path prefixes route under it. `engram-monitor` is intentionally not published — see [engram-monitor backend](#engram-monitor-backend) |
 | `ATLASSIAN_ENC_KEY` | AES-256-GCM key encrypting stored per-user Atlassian credentials |
 | `AUTH_GATEWAY_SESSION_SECRET` | Signs the HttpOnly session cookie issued by `POST /login` |
+| `AUTH_GATEWAY_ADMIN_SESSION_SECRET` | Signs the `__Host-admin_session` cookie for the [admin users panel](#admin-users-panel) — a distinct secret from `AUTH_GATEWAY_SESSION_SECRET`, never shared |
 | `ENGRAM_CLOUD_*`, `ENGRAM_JWT_SECRET` | `engram-cloud`'s (`engram cloud serve`) own config — team-shared memory instance |
 | `ENGRAM_CLOUD_DB_*` | Postgres credentials for `engram-cloud-db` |
 | `VITE_ENGRAM_URL` | **Build-time only.** engram-monitor's backend base URL, baked into its JS bundle by `vite build` — see [engram-monitor backend](#engram-monitor-backend) below |
