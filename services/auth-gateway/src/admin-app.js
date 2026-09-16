@@ -14,7 +14,7 @@ import { renderUsersPage } from './admin-panel.js';
 import { isAcceptableOrigin, verifyAdminCsrfToken, issueAdminCsrfToken } from './csrf.js';
 import { createLoginThrottle } from './admin-throttle.js';
 import { recordAudit } from './admin-audit.js';
-import { listManagedUsers, createManagedUser } from './user-admin.js';
+import { listManagedUsers, createManagedUser, setManagedUserDisabled } from './user-admin.js';
 
 // Every subdomain the Caddyfile carves /admin/login* out of forward_auth
 // for — keep in sync with the Caddyfile's admin-gated vhosts.
@@ -514,12 +514,114 @@ async function handlePostAdminUsers(req, res, db, config) {
 }
 
 /**
+ * POST /admin/users/disable and POST /admin/users/enable — the full 5-step
+ * admin write guard, then setManagedUserDisabled with `disabled` fixed by
+ * which route matched (design.md's Route Inventory: two separate routes,
+ * not one route with a body flag — the disable/enable choice is never
+ * itself an attacker-controlled input). The target user id ALWAYS comes
+ * from the POST body's `userId` field, never a path parameter (spec.md's
+ * Disable/Enable requirement).
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ * @param {boolean} disabled
+ */
+async function handlePostAdminUserDisabled(req, res, db, config, disabled) {
+  // 1. Authenticate — cookie only.
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  // 2. Origin check — strict (D7), same reasoning as every other admin write.
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  // 3. Parse body.
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  // 4. CSRF token — header first, else the form field.
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  const csrfOk = verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret });
+  if (!csrfOk) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=csrf' });
+      res.end();
+      return;
+    }
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  // 5. Validate the target shape, then mutate + audit atomically
+  // (setManagedUserDisabled, D8). userId is a form field, so it always
+  // arrives as a string — Number() on a non-numeric or missing value
+  // yields NaN, handled as invalid_request_body rather than reaching the
+  // DB layer with a garbage bind parameter.
+  const userId = Number(data?.userId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=invalid' });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  const changed = setManagedUserDisabled(db, {
+    userId,
+    disabled,
+    actorUserId: admin.id,
+    actorLabel: admin.username,
+  });
+  if (!changed) {
+    // Unknown id, or the admin's own row (A14 — setManagedUserDisabled's
+    // `AND is_admin = 0` predicate makes that a no-op by construction, not
+    // a special case this handler needs to detect itself).
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=not_found' });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'user_not_found' });
+    return;
+  }
+
+  if (isForm) {
+    res.writeHead(302, { Location: '/admin/users' });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
- * /admin/verify, /admin/login (GET+POST), /admin/logout, and /admin/users
- * (GET+POST) are implemented; every other /admin/* path 404s until its own
- * unit lands (Phases 9-11).
+ * /admin/verify, /admin/login (GET+POST), /admin/logout, /admin/users
+ * (GET+POST), and /admin/users/disable+enable are implemented; every other
+ * /admin/* path 404s until its own unit lands (Phases 10-11).
  * The authorization boundary is always this path prefix, never
  * req.headers.host (D2) — nothing in this dispatcher or authenticateAdmin
  * ever reads Host/X-Forwarded-Host.
@@ -560,6 +662,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/users') {
     await handlePostAdminUsers(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/users/disable') {
+    await handlePostAdminUserDisabled(req, res, db, config, true);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/users/enable') {
+    await handlePostAdminUserDisabled(req, res, db, config, false);
     return true;
   }
 

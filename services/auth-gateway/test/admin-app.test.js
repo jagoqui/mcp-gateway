@@ -765,3 +765,192 @@ test('a successful POST /admin/users writes one user.create audit row', async ()
   assert.equal(rows[0].outcome, 'success');
   assert.equal(rows[0].actor_user_id, userId);
 });
+
+// Phase 9 — POST /admin/users/disable + POST /admin/users/enable
+
+test('POST /admin/users/disable with a valid target sets disabled_at, leaves tokens untouched, redirects, and audits', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'disable-target', isAdmin: false });
+  db.prepare('INSERT INTO tokens (user_id, token_hash) VALUES (?, ?)').run(targetId, 'hash-1');
+
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users');
+
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(targetId));
+  assert.ok(row.disabled_at);
+  const tokenRow = /** @type {any} */ (
+    db.prepare('SELECT * FROM tokens WHERE user_id = ?').get(targetId)
+  );
+  assert.equal(tokenRow.revoked_at, null);
+
+  const auditRows = db.prepare('SELECT * FROM admin_audit_log').all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'user.disable');
+});
+
+test('POST /admin/users/enable clears disabled_at and audits user.enable', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const targetId = insertUser({ username: 'enable-target', isAdmin: false, disabled: true });
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/users/enable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(targetId));
+  assert.equal(row.disabled_at, null);
+
+  const auditRows = db.prepare('SELECT * FROM admin_audit_log').all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'user.enable');
+});
+
+test("threat: POST /admin/users/disable targeting the admin's own id fails, no mutation, no audit row (A14)", async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(userId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=not_found');
+
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(userId));
+  assert.equal(row.disabled_at, null);
+  assert.equal(db.prepare('SELECT * FROM admin_audit_log').all().length, 0);
+});
+
+test('POST /admin/users/disable with an unknown userId redirects to /admin/users?error=not_found', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: '999999', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=not_found');
+});
+
+test('POST /admin/users/disable with a non-numeric userId redirects to /admin/users?error=invalid', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: 'not-a-number', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=invalid');
+});
+
+test('POST /admin/users/disable with a mismatched Origin returns 403, before touching the database', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const targetId = insertUser({ username: 'origin-guard-target', isAdmin: false });
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), csrf }),
+  });
+  assert.equal(res.status, 403);
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(targetId));
+  assert.equal(row.disabled_at, null);
+});
+
+test('POST /admin/users/disable with a missing CSRF token redirects to /admin/users?error=csrf', async () => {
+  const { cookie } = loginAsAdmin();
+  const targetId = insertUser({ username: 'csrf-guard-target', isAdmin: false });
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId) }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=csrf');
+});
+
+test('POST /admin/users/disable and /admin/users/enable with no admin cookie return 401', async () => {
+  const disableRes = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ userId: '1' }),
+  });
+  assert.equal(disableRes.status, 401);
+
+  const enableRes = await fetch(`${baseUrl}/admin/users/enable`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ userId: '1' }),
+  });
+  assert.equal(enableRes.status, 401);
+});
+
+test('a regular (non-admin) session cookie never authenticates POST /admin/users/disable', async () => {
+  const regularId = insertUser({ username: 'disable-regular-cookie-test', isAdmin: false });
+  const regularToken = createSessionToken({ uid: regularId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/admin/users/disable`, {
+    method: 'POST',
+    headers: {
+      Cookie: `session=${regularToken}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(regularId) }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test('GET /admin/users renders a per-row Disable button for an active user and an Enable button for a disabled one', async () => {
+  const { cookie } = loginAsAdmin();
+  insertUser({ username: 'row-active', isAdmin: false });
+  insertUser({ username: 'row-disabled', isAdmin: false, disabled: true });
+
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('action="/admin/users/disable"'));
+  assert.ok(body.includes('action="/admin/users/enable"'));
+});

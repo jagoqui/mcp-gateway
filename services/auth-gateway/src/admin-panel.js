@@ -11,23 +11,39 @@ export const ADMIN_PANEL_ERRORS = Object.freeze({
   invalid: 'Enter a username and password.',
   duplicate: 'That username is already taken.',
   csrf: 'Your page expired. Reload and try again.',
+  not_found: 'That user could not be found.',
 });
 
 /**
- * One row of the users table. `active_token_count`/`revoked_token_count`
- * are SQL-aggregated integers (listManagedUsers), never user input, so they
- * are interpolated directly — only `username` goes through escapeHtml
- * (A12: stored XSS via a malicious username).
- * @param {{ username: string, disabled_at: string | null, active_token_count: number, revoked_token_count: number }} user
+ * One row of the users table, plus its disable/enable form (Unit 9) —
+ * whichever action is valid for the row's current state, mirroring
+ * panel.js's renderPerUserSection delete-form convention: a tiny
+ * single-button `<form>` carrying the hidden `userId` + `csrf` fields
+ * needed by POST /admin/users/disable or /admin/users/enable.
+ * `active_token_count`/`revoked_token_count` are SQL-aggregated integers
+ * (listManagedUsers), never user input, so they are interpolated directly —
+ * only `username` goes through escapeHtml (A12: stored XSS via a malicious
+ * username).
+ * @param {{ id: number, username: string, disabled_at: string | null, active_token_count: number, revoked_token_count: number }} user
+ * @param {string} csrfToken
  * @returns {string}
  */
-function renderUserRow(user) {
-  const badge = user.disabled_at ? 'disabled' : 'active';
+function renderUserRow(user, csrfToken) {
+  const disabled = Boolean(user.disabled_at);
+  const badge = disabled ? 'disabled' : 'active';
+  const action = disabled ? 'enable' : 'disable';
+  const label = disabled ? 'Enable' : 'Disable';
+  const actionFormMarkup = `<form method="post" action="/admin/users/${action}">
+    <input type="hidden" name="userId" value="${user.id}">
+    <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+    <button type="submit">${label}</button>
+  </form>`;
   return `<tr>
     <td>${escapeHtml(user.username)}</td>
     <td><span class="badge">${badge}</span></td>
     <td>${user.active_token_count}</td>
     <td>${user.revoked_token_count}</td>
+    <td>${actionFormMarkup}</td>
   </tr>`;
 }
 
@@ -51,13 +67,13 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
       ? ADMIN_PANEL_ERRORS[errorCode]
       : null;
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
-  const rows = users.map(renderUserRow).join('\n');
+  const rows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
   const body = `<main>
   <h1>Users</h1>
   ${errorMarkup}
   <table>
     <thead>
-      <tr><th>Username</th><th>Status</th><th>Active tokens</th><th>Revoked tokens</th></tr>
+      <tr><th>Username</th><th>Status</th><th>Active tokens</th><th>Revoked tokens</th><th></th></tr>
     </thead>
     <tbody>
       ${rows}

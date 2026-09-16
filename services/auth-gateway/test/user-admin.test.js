@@ -9,6 +9,7 @@ import {
   revokeToken,
   listManagedUsers,
   setUserDisabled,
+  setManagedUserDisabled,
   setPassword,
   listTokensForUser,
   revokeTokenById,
@@ -206,6 +207,111 @@ test('setUserDisabled is a no-op against an admin row (AND is_admin = 0)', async
   assert.equal(setUserDisabled(db, { userId: admin.id, disabled: true }), false);
   const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(admin.id));
   assert.equal(row.disabled_at, null);
+  db.close();
+});
+
+// Unit 9 — POST /admin/users/disable + POST /admin/users/enable's audited path.
+test('setManagedUserDisabled sets disabled_at, leaves tokens untouched, and audits user.disable', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin3',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createUser(db, { username: 'faye', password: 'irrelevant' });
+  issueToken(db, { userId: user.id, label: 'phone' });
+
+  const result = setManagedUserDisabled(db, {
+    userId: user.id,
+    disabled: true,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin3',
+  });
+  assert.equal(result, true);
+
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(user.id));
+  assert.ok(row.disabled_at, 'expected disabled_at to be set');
+  const tokenRow = /** @type {any} */ (
+    db.prepare('SELECT * FROM tokens WHERE user_id = ?').get(user.id)
+  );
+  assert.equal(tokenRow.revoked_at, null);
+
+  const auditRows = allAuditRows(db);
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'user.disable');
+  assert.equal(auditRows[0].outcome, 'success');
+  assert.equal(auditRows[0].actor_user_id, admin.id);
+  assert.equal(auditRows[0].target_user_id, user.id);
+  db.close();
+});
+
+test('setManagedUserDisabled(disabled: false) clears disabled_at and audits user.enable', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin4',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createUser(db, { username: 'greg', password: 'irrelevant' });
+  setManagedUserDisabled(db, {
+    userId: user.id,
+    disabled: true,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin4',
+  });
+
+  const result = setManagedUserDisabled(db, {
+    userId: user.id,
+    disabled: false,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin4',
+  });
+  assert.equal(result, true);
+
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(user.id));
+  assert.equal(row.disabled_at, null);
+
+  const auditRows = allAuditRows(db);
+  assert.equal(auditRows.length, 2);
+  assert.equal(auditRows[1].action, 'user.enable');
+  db.close();
+});
+
+test('setManagedUserDisabled against the admin row (A14) returns false and writes no audit row', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin5',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const result = setManagedUserDisabled(db, {
+    userId: admin.id,
+    disabled: true,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin5',
+  });
+  assert.equal(result, false);
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM users WHERE id = ?').get(admin.id));
+  assert.equal(row.disabled_at, null);
+  assert.equal(allAuditRows(db).length, 0);
+  db.close();
+});
+
+test('setManagedUserDisabled against an unknown userId returns false and writes no audit row', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin6',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const result = setManagedUserDisabled(db, {
+    userId: 999999,
+    disabled: true,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin6',
+  });
+  assert.equal(result, false);
+  assert.equal(allAuditRows(db).length, 0);
   db.close();
 });
 

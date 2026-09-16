@@ -133,6 +133,44 @@ export function setUserDisabled(db, opts) {
 }
 
 /**
+ * setUserDisabled's audited counterpart (D8, same reasoning as
+ * createManagedUser above) — the admin panel's POST /admin/users/disable
+ * and POST /admin/users/enable use this instead of the plain
+ * setUserDisabled, which stays unaudited for any other caller.
+ *
+ * No async step here (unlike createManagedUser's bcrypt hash), so the
+ * whole thing is one plain synchronous db.transaction: the UPDATE and its
+ * audit row commit or roll back together. When the WHERE predicate matches
+ * nothing — an unknown id, or the admin's own row (A14, `is_admin = 0`) —
+ * `changes` is 0, the function returns false, and NO audit row is written:
+ * an action that didn't happen must never look like it did in the trail.
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ userId: number, disabled: boolean, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {boolean}
+ */
+export function setManagedUserDisabled(db, opts) {
+  const { userId, disabled, actorUserId, actorLabel } = opts;
+  const runTransaction = db.transaction(() => {
+    const sql = disabled
+      ? "UPDATE users SET disabled_at = datetime('now') WHERE id = ? AND is_admin = 0"
+      : 'UPDATE users SET disabled_at = NULL WHERE id = ? AND is_admin = 0';
+    const result = db.prepare(sql).run(userId);
+    if (result.changes === 0) {
+      return false;
+    }
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: disabled ? 'user.disable' : 'user.enable',
+      outcome: 'success',
+      targetUserId: userId,
+    });
+    return true;
+  });
+  return runTransaction();
+}
+
+/**
  * Lists every regular (non-admin) user with a token-count summary — never a
  * raw/hashed token value (A11). `t.id IS NOT NULL` guards the active count
  * against the LEFT JOIN's phantom all-NULL row for a user with no tokens.
