@@ -59,27 +59,51 @@ instead of per-identity spawning. See design.md's corrected decision.
 - [x] 2.9 `Caddyfile`: new `monitor.{$DOMAIN}` block, `forward_auth auth-gateway:3000 { uri /admin/verify }`, same shape as every existing gated block; validated via `caddy validate` in a throwaway container.
 - [ ] 2.10 Manual E2E (deferred to actual deploy): unauthenticated request to `monitor.{$DOMAIN}` redirects to admin login; authenticated request loads the dashboard; a `PATCH /observations/{id}` through the bridge becomes visible via a direct `cloud_mutations` query against `engram-cloud`'s Postgres (same verification technique `engram-remote-mcp` used).
 
-## Phase 3: Engram Cloud Admin Proxy Routes (Unit 3, PR 3, needs PR1 and Phase 0.2) — COMPLETE
+## Phase 3: Engram Cloud Admin Proxy Routes (Unit 3, PR 3, needs PR1 and Phase 0.2) — COMPLETE, VERIFIED LIVE
 
-**Correction found while implementing, not guessed**: design.md's "New env
-vars: `ENGRAM_CLOUD_ADMIN_TOKEN`" was wrong — `.env.example` and
-`docker-compose.yml`'s `engram-cloud` service already provision
-`ENGRAM_CLOUD_ADMIN`, confirmed via deepwiki as exactly the legacy admin
-fallback Bearer token `engram cloud serve` itself accepts for its `/admin/*`
-API (alongside `ENGRAM_CLOUD_TOKEN`, which only grants sync-level access).
-Reused the existing `ENGRAM_CLOUD_ADMIN` value — real, non-empty in the
-live `.env` on this VPS already — instead of inventing a second admin
-secret nobody had provisioned yet. `ENGRAM_CLOUD_SERVER` (base URL) also
-reused verbatim from `engram-router`/`engram-serve-bridge`'s own existing
-env var, not a new name.
+**Correction found while implementing, then re-corrected after live testing —
+design.md's original naming was right all along.** First pass wrongly
+concluded the existing `ENGRAM_CLOUD_ADMIN` env var (already provisioned,
+already live) could be reused as the Bearer token for these routes instead
+of provisioning a new `ENGRAM_CLOUD_ADMIN_TOKEN` secret. That reuse was
+committed, deployed, and got a hard 403 against the real `engram cloud
+serve` instance. Root cause, confirmed via deepwiki against engram's own
+source: `requireManagedAdmin` (called by every `/admin/*` handler) checks
+`principal.Source == PrincipalSourceManagedToken` and explicitly REJECTS
+`PrincipalSourceLegacyEnvAdmin` — the source tag for both `ENGRAM_CLOUD_ADMIN`
+and `ENGRAM_CLOUD_TOKEN` — confirmed by engram's own test,
+`TestAdminHandlersRequireManagedAdminAndLeaveNoStateForMembers`, which lists
+a legacy admin principal as `forbiddenPrincipal` for exactly these routes.
+A genuinely separate managed-admin token is required. `ENGRAM_CLOUD_SERVER`
+(base URL, reused verbatim from `engram-router`/`engram-serve-bridge`) was
+never wrong — only the admin-token identity was.
 
-- [x] 3.1 RED `test/engram-cloud-client.test.js`: each client function (`listUsers`, `createUser`, `grantProject`, `issueToken`) sends the correct method/path/body/`Authorization: Bearer <ENGRAM_CLOUD_ADMIN>` to a stubbed HTTP layer (real `node:http` stub server, matching this repo's established test convention, not a mocked `fetch`); token value never appears in any thrown error message or log call. 8 tests.
-- [x] 3.2 GREEN: `src/engram-cloud-client.js` — thin fetch wrapper, one function per proxied endpoint, reading `ENGRAM_CLOUD_ADMIN` lazily (never cached — same rotation property as every other secret-reading function in this codebase). Request/response shapes for `GET`/`POST /admin/users` and `POST /admin/users/{id}/grants` confirmed via deepwiki against engram's own source (`handleAdminListUsers`/`handleAdminCreateUser`/`handleAdminCreateGrant`), not guessed — `POST /admin/users/{id}/tokens`'s shape was already confirmed in Phase 0.2.
+Recovering a real managed token also required fixing a second,
+independent live-infra gap: `ENGRAM_CLOUD_TOKEN_PEPPER` was never set on
+this deployment's `engram-cloud` service (a gap already known from
+`engram-console-workspaces`'s own exploration phase, hit again
+independently here) — without it, managed-token auth is disabled
+server-side entirely, regardless of which token is sent. Provisioned a
+new pepper value, then synced it to match `~/.engram/.env`'s existing
+value instead (the original engram-cloud deployment this stack's Postgres
+data was consolidated from — a mismatched pepper would make the existing
+managed-admin's token hash unverifiable). Then `engram cloud bootstrap
+recover-token` refused ("requires zero principal tokens, found 1") because
+an earlier session had already bootstrapped the one allowed managed admin
+and issued it a token that was shown once, never saved, and never used
+(`last_used_at` null, confirmed by a read-only query of `cloud_principal_tokens`
+first). Deleted that specific unused, never-used token row (explicit user
+confirmation obtained first) so the recovery-eligibility check would pass,
+then successfully recovered a fresh managed-admin token.
+
+- [x] 3.1 RED `test/engram-cloud-client.test.js`: each client function (`listUsers`, `createUser`, `grantProject`, `issueToken`) sends the correct method/path/body/`Authorization: Bearer <ENGRAM_CLOUD_ADMIN_TOKEN>` to a stubbed HTTP layer (real `node:http` stub server, matching this repo's established test convention, not a mocked `fetch`); token value never appears in any thrown error message or log call. 8 tests.
+- [x] 3.2 GREEN: `src/engram-cloud-client.js` — thin fetch wrapper, one function per proxied endpoint, reading `ENGRAM_CLOUD_ADMIN_TOKEN` lazily (never cached — same rotation property as every other secret-reading function in this codebase). Request/response shapes for `GET`/`POST /admin/users` and `POST /admin/users/{id}/grants` confirmed via deepwiki against engram's own source (`handleAdminListUsers`/`handleAdminCreateUser`/`handleAdminCreateGrant`), not guessed — `POST /admin/users/{id}/tokens`'s shape was already confirmed in Phase 0.2.
 - [x] 3.3 RED `test/admin-app.test.js` (extend): each new `/admin/engram-cloud/*` route — unauthenticated → same rejection as other `/admin/*` routes, no outbound call attempted (asserted against the real stub server, never hit); authenticated → relays the client's result; mismatched Origin / missing CSRF → 403, stub never hit; upstream failure → 502, never a raw stack trace or the token. 12 tests. These routes are a pure JSON relay for Monitor's own SPA (Phase 4) — no HTML form — so `GET /admin/engram-cloud/users` hands out a fresh admin CSRF token in its own JSON response (`{csrfToken, users}`) for the SPA to reuse via `X-CSRF-Token` on the three POST routes, the JSON equivalent of every other admin page's hidden csrf field.
 - [x] 3.4 GREEN: wired all four routes (`GET`/`POST /admin/engram-cloud/users`, `POST /admin/engram-cloud/users/:id/grants`, `POST /admin/engram-cloud/users/:id/tokens`) into `handleAdminRequest` — the two `:id` routes use a regex match, this dispatcher's first dynamic-segment routes (every prior route was an exact string match).
 - [x] 3.5 REFACTOR: confirmed the response relay never re-serializes in a way that could leak the token — `relayEngramCloudCall`'s catch always returns a fixed `{error: 'engram_cloud_unreachable'}` shape, never the caught error's own message/stack. No local `admin_audit_log` entry for these routes (deliberate, not an oversight): they operate on Engram Cloud's own separate principal/token ID space, not auth-gateway's `users`/`tokens` tables — a `target_user_id`/`target_token_id` FK there would reference a nonexistent local row. Engram Cloud's own admin API already audits these actions server-side (confirmed via deepwiki: "All admin actions are audited").
-- [x] `docker-compose.yml`: `auth-gateway`'s environment gained `ENGRAM_CLOUD_ADMIN` (reused, see correction above) and `ENGRAM_CLOUD_SERVER: http://engram-cloud:18080` (reused from engram-router/engram-serve-bridge). Validated with `docker compose config`.
-- [ ] `.env.example`: comment update documenting `ENGRAM_CLOUD_ADMIN`'s now-dual role (engram-cloud's own auth AND auth-gateway's proxy client) — blocked by this session's own file-write permissions on `.env.example`; the exact diff was handed to the user to apply via `!`, not yet confirmed applied.
+- [x] `docker-compose.yml`: `auth-gateway`'s environment gained `ENGRAM_CLOUD_ADMIN_TOKEN` (a genuine managed-admin secret, see correction above) and `ENGRAM_CLOUD_SERVER: http://engram-cloud:18080`. `engram-cloud`'s own environment gained `ENGRAM_CLOUD_TOKEN_PEPPER`. Validated with `docker compose config`.
+- [x] task 2.10's proxy-relevant slice: `GET /admin/engram-cloud/users`, verified live end-to-end (2026-09-16) through the real Caddy → auth-gateway → engram-cloud chain on this VPS — 200, returned the deployment's two real managed users. The rest of task 2.10 (Monitor dashboard load, `PATCH /observations/{id}` visibility) is Phase 2's own scope, not re-verified here.
+- [ ] `.env.example`: comment documenting `ENGRAM_CLOUD_ADMIN_TOKEN` (new secret) and `ENGRAM_CLOUD_TOKEN_PEPPER` (new secret, on the `engram-cloud` section) — blocked by this session's own file-write permissions on `.env.example`; both were provisioned directly in the live `.env` instead (handed to the user to apply via `!`, confirmed applied), but the example template documenting them for the next deploy is still outstanding.
 
 Full suite: 344/344 `node --test` passing (up from 314 before this phase — 30 new tests: 8 in `engram-cloud-client.test.js`, 22 in `admin-app.test.js`), lint and format clean.
 

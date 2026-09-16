@@ -6,7 +6,7 @@ import { listUsers, createUser, grantProject, issueToken } from '../src/engram-c
 const ADMIN_TOKEN = 'test-engram-cloud-admin-token';
 
 before(() => {
-  process.env.ENGRAM_CLOUD_ADMIN = ADMIN_TOKEN;
+  process.env.ENGRAM_CLOUD_ADMIN_TOKEN = ADMIN_TOKEN;
 });
 
 /** @type {http.Server} */
@@ -114,13 +114,13 @@ test('threat: a non-2xx response throws an Error whose message never contains th
   );
 });
 
-test('every client function throws when ENGRAM_CLOUD_ADMIN is unset, before ever sending a request', async () => {
-  const original = process.env.ENGRAM_CLOUD_ADMIN;
+test('every client function throws when ENGRAM_CLOUD_ADMIN_TOKEN is unset, before ever sending a request', async () => {
+  const original = process.env.ENGRAM_CLOUD_ADMIN_TOKEN;
   try {
-    delete process.env.ENGRAM_CLOUD_ADMIN;
+    delete process.env.ENGRAM_CLOUD_ADMIN_TOKEN;
     await assert.rejects(() => listUsers());
     assert.deepEqual(lastRequest, {});
   } finally {
-    process.env.ENGRAM_CLOUD_ADMIN = original;
+    process.env.ENGRAM_CLOUD_ADMIN_TOKEN = original;
   }
 });

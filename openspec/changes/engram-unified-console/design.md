@@ -175,12 +175,44 @@ All three were resolved against real source before any code was written:
 
 ## Post-Implementation Correction (Phase 3, see tasks.md)
 
-Every `ENGRAM_CLOUD_ADMIN_TOKEN` reference above (lines ~62, ~92, ~115,
-~126, ~132) is WRONG — do not provision a new secret by that name.
-`.env.example`/`docker-compose.yml`'s `engram-cloud` service already
-provision `ENGRAM_CLOUD_ADMIN`, confirmed via deepwiki as exactly the
-legacy admin fallback Bearer token `engram cloud serve` itself accepts for
-its own `/admin/*` API. `engram-cloud-client.js` reuses that existing,
-already-live value; `ENGRAM_CLOUD_SERVER` is likewise reused verbatim from
-`engram-router`/`engram-serve-bridge`, not a new name either. See tasks.md
-Phase 3 for the full correction and the verified route/payload shapes.
+The design's original `ENGRAM_CLOUD_ADMIN_TOKEN` naming (lines ~62, ~92,
+~115, ~126, ~132) is CORRECT after all — it names a genuine, separate
+managed-admin secret, distinct from the legacy `ENGRAM_CLOUD_ADMIN`/
+`ENGRAM_CLOUD_TOKEN` env vars `engram cloud serve` itself reads.
+
+A prior revision of this note wrongly concluded the existing
+`ENGRAM_CLOUD_ADMIN` value could be reused instead — that was tested live
+against the real `engram cloud serve` instance and got a hard 403.
+Confirmed via deepwiki against engram's own source: every `/admin/*` route
+runs through `requireManagedAdmin`, which explicitly checks
+`principal.Source == PrincipalSourceManagedToken` and REJECTS
+`PrincipalSourceLegacyEnvAdmin` (the source tag for both
+`ENGRAM_CLOUD_ADMIN` and `ENGRAM_CLOUD_TOKEN`) outright — confirmed by this
+engram version's own test, `TestAdminHandlersRequireManagedAdminAndLeaveNoStateForMembers`,
+which lists a legacy admin principal as `forbiddenPrincipal` for these
+exact routes. `ENGRAM_CLOUD_ADMIN_TOKEN` (docker-compose.yml, auth-gateway
+service) now holds a genuinely separate, real managed-admin Bearer token,
+recovered live on this VPS via `engram cloud bootstrap recover-token`
+(the deployment's one existing managed admin had a token row that was
+never used/saved by an earlier session — deleted it first so the CLI's
+"zero principal tokens" recovery-eligibility check would pass, then
+recovered a fresh one). `ENGRAM_CLOUD_SERVER` is still reused verbatim
+from `engram-router`/`engram-serve-bridge`, that part of the original
+correction held.
+
+Also required, and NOT originally called out anywhere in this design:
+`ENGRAM_CLOUD_TOKEN_PEPPER` must be set on the `engram-cloud` service
+itself (docker-compose.yml), or managed-token authentication is disabled
+server-side entirely, regardless of which Bearer token is sent — this was
+already a known gap from `engram-console-workspaces`'s own exploration
+phase, hit again independently here. Provisioned live on this VPS,
+synced from `~/.engram/.env`'s existing value (the original engram-cloud
+deployment this stack's data was consolidated from — a mismatched pepper
+would have made the existing managed-admin token's hash unverifiable).
+
+Verified live end-to-end against the real production `engram-cloud`
+(2026-09-16): `GET /admin/engram-cloud/users` through the full
+Caddy → auth-gateway → engram-cloud chain returned the two real managed
+users on this deployment. See tasks.md Phase 3 for the corrected
+route/payload shapes (those were already right, deepwiki-verified,
+untouched by this correction).

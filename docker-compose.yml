@@ -46,17 +46,21 @@ services:
       ATLASSIAN_ENC_KEY: ${ATLASSIAN_ENC_KEY}
       AUTH_GATEWAY_SESSION_SECRET: ${AUTH_GATEWAY_SESSION_SECRET}
       AUTH_GATEWAY_ADMIN_SESSION_SECRET: ${AUTH_GATEWAY_ADMIN_SESSION_SECRET}
-      # Same legacy admin fallback token already provisioned for the
-      # engram-cloud service itself below (engram cloud serve's own
-      # ENGRAM_CLOUD_ADMIN env var) — reused here as the Bearer credential
-      # for real admin privileges (create user, grant project, issue
-      # token), distinct from ENGRAM_CLOUD_TOKEN, which engram-router/
-      # engram-serve only use for sync-anything, never admin actions.
-      # Confirmed via deepwiki against engram's own source: the server
-      # accepts either ENGRAM_CLOUD_TOKEN or ENGRAM_CLOUD_ADMIN as a
-      # legacy fallback Bearer value — no new secret needed. See
-      # services/auth-gateway/src/engram-cloud-client.js.
-      ENGRAM_CLOUD_ADMIN: ${ENGRAM_CLOUD_ADMIN}
+      # A genuine MANAGED admin token (PrincipalSourceManagedToken), issued
+      # via `engram cloud bootstrap admin --issue-token` /
+      # `bootstrap recover-token` against the live engram-cloud instance —
+      # NOT the same value as engram-cloud's own ENGRAM_CLOUD_ADMIN below.
+      # Confirmed via deepwiki against engram's own source
+      # (requireManagedAdmin): every /admin/* route explicitly REJECTS the
+      # legacy ENGRAM_CLOUD_TOKEN/ENGRAM_CLOUD_ADMIN env-var fallback
+      # tokens (PrincipalSourceLegacyEnvAdmin) with 403 — a first, wrong
+      # assumption this comment used to make. Also requires
+      # ENGRAM_CLOUD_TOKEN_PEPPER to be set on engram-cloud itself, or
+      # managed-token auth is disabled entirely server-side. See
+      # services/auth-gateway/src/engram-cloud-client.js and
+      # openspec/changes/engram-unified-console/design.md's
+      # "Post-Implementation Correction".
+      ENGRAM_CLOUD_ADMIN_TOKEN: ${ENGRAM_CLOUD_ADMIN_TOKEN}
       ENGRAM_CLOUD_SERVER: http://engram-cloud:18080
     volumes:
       - auth_gateway_data:/data
@@ -209,6 +213,13 @@ services:
       ENGRAM_DATABASE_URL: postgres://${ENGRAM_CLOUD_DB_USER}:${ENGRAM_CLOUD_DB_PASSWORD}@engram-cloud-db:5432/${ENGRAM_CLOUD_DB_NAME}
       ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN}
       ENGRAM_CLOUD_ADMIN: ${ENGRAM_CLOUD_ADMIN}
+      # Without this, managed-token auth (PrincipalSourceManagedToken) is
+      # disabled entirely and the server falls back to legacy
+      # ENGRAM_CLOUD_TOKEN/ENGRAM_CLOUD_ADMIN credentials only — which
+      # requireManagedAdmin explicitly forbids on every /admin/* route
+      # (confirmed via deepwiki against engram's own source, engram-unified-
+      # console Phase 3). Distinct secret from ENGRAM_JWT_SECRET below.
+      ENGRAM_CLOUD_TOKEN_PEPPER: ${ENGRAM_CLOUD_TOKEN_PEPPER}
       ENGRAM_JWT_SECRET: ${ENGRAM_JWT_SECRET}
       ENGRAM_CLOUD_ALLOWED_PROJECTS: ${ENGRAM_CLOUD_ALLOWED_PROJECTS}
       ENGRAM_CLOUD_HOST: 0.0.0.0

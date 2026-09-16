@@ -1653,10 +1653,10 @@ test('GET /admin/users/tokens renders a per-row Revoke/Regenerate form for an ac
 // Phase 3 (engram-unified-console) — /admin/engram-cloud/* proxy routes.
 // Unlike every other admin route above, these are a pure JSON relay for
 // Monitor's own SPA (Phase 4, external repo) to call — no HTML rendering,
-// no zero-JS form. ENGRAM_CLOUD_ADMIN/ENGRAM_CLOUD_SERVER point at a
+// no zero-JS form. ENGRAM_CLOUD_ADMIN_TOKEN/ENGRAM_CLOUD_SERVER point at a
 // local stub server standing in for `engram cloud serve` itself.
 
-const ENGRAM_CLOUD_ADMIN = 'test-engram-cloud-admin-token';
+const ENGRAM_CLOUD_ADMIN_TOKEN = 'test-engram-cloud-admin-token';
 
 /** @type {http.Server} */
 let engramCloudStub;
@@ -1666,7 +1666,7 @@ let lastEngramCloudRequest;
 let nextEngramCloudResponse;
 
 before(() => {
-  process.env.ENGRAM_CLOUD_ADMIN = ENGRAM_CLOUD_ADMIN;
+  process.env.ENGRAM_CLOUD_ADMIN_TOKEN = ENGRAM_CLOUD_ADMIN_TOKEN;
 });
 
 beforeEach(async () => {
@@ -1756,7 +1756,7 @@ test('POST /admin/engram-cloud/users with valid admin cookie, Origin, and CSRF r
   assert.equal(responseBody.principal_id, 'p2');
   assert.equal(lastEngramCloudRequest.method, 'POST');
   assert.equal(lastEngramCloudRequest.url, '/admin/users');
-  assert.equal(lastEngramCloudRequest.headers.authorization, `Bearer ${ENGRAM_CLOUD_ADMIN}`);
+  assert.equal(lastEngramCloudRequest.headers.authorization, `Bearer ${ENGRAM_CLOUD_ADMIN_TOKEN}`);
   assert.deepEqual(JSON.parse(lastEngramCloudRequest.body), { username: 'bob', role: 'member' });
 });
 
@@ -1864,7 +1864,7 @@ test('when the upstream engram-cloud call fails, the proxy route surfaces a 502,
   const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, { headers: { Cookie: cookie } });
   assert.equal(res.status, 502);
   const responseBody = /** @type {any} */ (await res.json());
-  assert.ok(!JSON.stringify(responseBody).includes(ENGRAM_CLOUD_ADMIN));
+  assert.ok(!JSON.stringify(responseBody).includes(ENGRAM_CLOUD_ADMIN_TOKEN));
   // afterEach's own engramCloudStub.close() on an already-closed server is a
   // harmless no-op (Node's http.Server.close() tolerates a double-close).
 });

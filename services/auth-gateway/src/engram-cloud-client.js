@@ -1,20 +1,20 @@
 // Thin fetch wrapper for engram-cloud's admin API (`engram cloud serve`).
 // Proxied by auth-gateway's own /admin/engram-cloud/* routes (admin-app.js)
-// so the browser never sees ENGRAM_CLOUD_ADMIN directly — the token
+// so the browser never sees ENGRAM_CLOUD_ADMIN_TOKEN directly — the token
 // is held only in this process's env and used only in outbound server-side
 // requests (design.md's Threat Matrix: "Engram Cloud admin token exposure").
 //
 // Route/payload shapes confirmed against engram's own source (deepwiki),
 // not guessed — see design.md's Interfaces/Open Questions sections.
 
-/** Reads ENGRAM_CLOUD_ADMIN per call (never cached), matching every
+/** Reads ENGRAM_CLOUD_ADMIN_TOKEN per call (never cached), matching every
  * other secret-reading function in this codebase's rotation property.
  * @returns {string}
  */
 function getEngramCloudAdminToken() {
-  const token = process.env.ENGRAM_CLOUD_ADMIN;
+  const token = process.env.ENGRAM_CLOUD_ADMIN_TOKEN;
   if (!token) {
-    throw new Error('ENGRAM_CLOUD_ADMIN is not set');
+    throw new Error('ENGRAM_CLOUD_ADMIN_TOKEN is not set');
   }
   return token;
 }
