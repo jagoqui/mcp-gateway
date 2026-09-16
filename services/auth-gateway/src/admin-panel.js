@@ -29,13 +29,49 @@ export const ADMIN_PANEL_ERRORS = Object.freeze({
 function renderAdminNav(csrfToken) {
   return `<nav class="nav">
   <a href="/admin/users">Users</a>
-  <a href="/dashboard">Engram Cloud dashboard</a>
-  <a href="/monitor">Monitor</a>
+  <a href="/admin/console?view=cloud">Engram Cloud dashboard</a>
+  <a href="/admin/console?view=monitor">Monitor</a>
   <form method="post" action="/admin/logout">
     <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
     <button type="submit">Log out</button>
   </form>
 </nav>`;
+}
+
+/**
+ * GET /admin/console?view=monitor|cloud (Phase 5) — the shared
+ * header+sidebar+main shell requested alongside SSO: Monitor and Engram
+ * Cloud's own dashboard render inside `<main>` via `<iframe>` instead of two
+ * unrelated full-page products. Neither is this app's own frontend source
+ * (Monitor: separate repo; Cloud: vendored binary), so a true shared shell —
+ * not just matching chrome — needs framing; confirmed via deepwiki that
+ * neither sends X-Frame-Options/frame-ancestors (design.md Phase 5). The
+ * `cloud` view's iframe src IS the SSO route (`/admin/engram-cloud/sso`),
+ * so opening that tab performs the per-admin login and lands the iframe on
+ * `/dashboard` in one step — no separate "log in first" click.
+ * @param {{ view?: string | null, csrfToken: string }} options
+ * @returns {string}
+ */
+export function renderConsolePage({ view, csrfToken }) {
+  const activeView = view === 'cloud' ? 'cloud' : 'monitor';
+  const iframeSrc = activeView === 'cloud' ? '/admin/engram-cloud/sso' : '/monitor';
+  const body = `<div class="shell">
+  <header class="shell-header">
+    <a href="/admin/users">Users</a>
+    <form method="post" action="/admin/logout">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <button type="submit">Log out</button>
+    </form>
+  </header>
+  <aside class="shell-sidebar">
+    <a href="/admin/console?view=monitor"${activeView === 'monitor' ? ' class="active"' : ''}>Monitor</a>
+    <a href="/admin/console?view=cloud"${activeView === 'cloud' ? ' class="active"' : ''}>Engram Cloud</a>
+  </aside>
+  <main class="shell-main">
+    <iframe src="${escapeHtml(iframeSrc)}" title="${activeView === 'cloud' ? 'Engram Cloud' : 'Monitor'}"></iframe>
+  </main>
+</div>`;
+  return renderDocument({ title: 'Admin — Console', body });
 }
 
 /**

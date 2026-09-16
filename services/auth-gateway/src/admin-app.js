@@ -7,10 +7,15 @@ import {
 } from './admin-session.js';
 import { wantsHtml } from './verify.js';
 import { verifyPassword } from './tokens.js';
-import { PAGE_HEADERS, ADMIN_PAGE_HEADERS } from './html.js';
+import { PAGE_HEADERS, ADMIN_PAGE_HEADERS, CONSOLE_PAGE_HEADERS } from './html.js';
 import { sanitizeNext } from './login-page.js';
 import { renderAdminLoginPage } from './admin-login-page.js';
-import { renderUsersPage, renderTokensPage, renderTokenIssuedPage } from './admin-panel.js';
+import {
+  renderUsersPage,
+  renderTokensPage,
+  renderTokenIssuedPage,
+  renderConsolePage,
+} from './admin-panel.js';
 import { isAcceptableOrigin, verifyAdminCsrfToken, issueAdminCsrfToken } from './csrf.js';
 import { createLoginThrottle } from './admin-throttle.js';
 import { recordAudit } from './admin-audit.js';
@@ -29,7 +34,9 @@ import {
   createUser as createEngramCloudUser,
   grantProject as grantEngramCloudProject,
   issueToken as issueEngramCloudToken,
+  loginDashboard as loginEngramCloudDashboard,
 } from './engram-cloud-client.js';
+import { encrypt, decrypt } from './crypto.js';
 
 // Every subdomain the Caddyfile carves /admin/login* out of forward_auth
 // for — keep in sync with the Caddyfile's admin-gated vhosts.
@@ -1193,6 +1200,116 @@ async function handlePostEngramCloudToken(req, res, db, config, principalId) {
 }
 
 /**
+ * GET /admin/console?view=monitor|cloud (Phase 5) — the shared
+ * header+sidebar+main shell. Auth pattern matches every other rendered
+ * admin GET page (handleGetAdminUsers): redirect an unauthenticated
+ * browser to the login page, 401 JSON for anything else.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {URL} url
+ */
+function handleGetAdminConsole(req, res, db, url) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/admin/login?next=%2Fadmin%2Fconsole' });
+      res.end();
+      return;
+    }
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
+  res.writeHead(200, CONSOLE_PAGE_HEADERS);
+  res.end(renderConsolePage({ view: url.searchParams.get('view'), csrfToken }));
+}
+
+/**
+ * Reads this admin's own stored Engram Cloud token (Phase 5 SSO), if any.
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @returns {string | null}
+ */
+function getEngramCloudCredential(db, userId) {
+  const row = /** @type {any} */ (
+    db.prepare('SELECT ciphertext FROM engram_cloud_credentials WHERE user_id = ?').get(userId)
+  );
+  return row ? decrypt(row.ciphertext) : null;
+}
+
+/**
+ * Stores this admin's own Engram Cloud token at rest, encrypted the same
+ * way atlassian_credentials already is (crypto.js, reused as-is — see
+ * design.md Phase 5).
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ userId: number, principalId: string, token: string }} opts
+ */
+function saveEngramCloudCredential(db, { userId, principalId, token }) {
+  db.prepare(
+    `INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(user_id) DO UPDATE SET
+       principal_id = excluded.principal_id,
+       ciphertext = excluded.ciphertext,
+       updated_at = excluded.updated_at`,
+  ).run(userId, principalId, encrypt(token));
+}
+
+/**
+ * GET /admin/engram-cloud/sso — per-admin auto-login into Engram Cloud's
+ * own built-in dashboard (Phase 5). A plain navigational GET (no state
+ * mutation of our own tables beyond lazily provisioning a Cloud identity
+ * the first time), so no CSRF/Origin check — matches every other read-only
+ * admin GET route. Provisions once, on first use, then always dashboard-
+ * logs-in with THIS admin's own stored token — never the shared
+ * ENGRAM_CLOUD_ADMIN_TOKEN (design.md Phase 5's explicit identity decision:
+ * every admin must appear as their own distinct Cloud principal).
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ */
+async function handleGetEngramCloudSso(req, res, db) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  try {
+    let token = getEngramCloudCredential(db, admin.id);
+    if (!token) {
+      const created = await createEngramCloudUser({ username: admin.username, role: 'admin' });
+      const issued = await issueEngramCloudToken({
+        principalId: created.principal_id,
+        name: 'console-sso',
+      });
+      token = issued.raw_token;
+      saveEngramCloudCredential(db, {
+        userId: admin.id,
+        principalId: created.principal_id,
+        token,
+      });
+    }
+
+    const { setCookie } = await loginEngramCloudDashboard(token);
+    if (setCookie) {
+      res.setHeader('Set-Cookie', setCookie);
+    }
+    res.writeHead(302, { Location: '/dashboard' });
+    res.end();
+  } catch {
+    // Never the caught error's own message/stack (same discipline as
+    // relayEngramCloudCall) — a create-user collision, an unreachable
+    // upstream, and a dashboard-login rejection all surface identically.
+    sendJson(res, 502, { error: 'engram_cloud_sso_failed' });
+  }
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
@@ -1268,6 +1385,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/tokens/regenerate') {
     await handlePostAdminTokensRegenerate(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'GET' && pathname === '/admin/console') {
+    handleGetAdminConsole(req, res, db, url);
+    return true;
+  }
+
+  if (req.method === 'GET' && pathname === '/admin/engram-cloud/sso') {
+    await handleGetEngramCloudSso(req, res, db);
     return true;
   }
 

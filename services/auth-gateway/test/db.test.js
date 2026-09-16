@@ -6,12 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { openDb } from '../src/db.js';
 
-test('openDb creates the users, tokens, atlassian_credentials, and admin_audit_log tables', () => {
+test('openDb creates the users, tokens, atlassian_credentials, engram_cloud_credentials, and admin_audit_log tables', () => {
   const db = openDb(':memory:');
   const tables = /** @type {{ name: string }[]} */ (
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
   ).map((row) => row.name);
-  assert.deepEqual(tables, ['admin_audit_log', 'atlassian_credentials', 'tokens', 'users']);
+  assert.deepEqual(tables, [
+    'admin_audit_log', 'atlassian_credentials', 'engram_cloud_credentials', 'tokens', 'users',
+  ]);
   db.close();
 });
 
@@ -103,5 +105,42 @@ test('atlassian_credentials.user_id is unique per user (one credential row per p
       "INSERT INTO atlassian_credentials (user_id, scheme, ciphertext, updated_at) VALUES (1, 'token', 'cipher-b', datetime('now'))",
     ).run();
   });
+  db.close();
+});
+
+test('engram_cloud_credentials has the expected columns', () => {
+  const db = openDb(':memory:');
+  const columns = /** @type {{ name: string }[]} */ (
+    db.prepare('PRAGMA table_info(engram_cloud_credentials)').all()
+  ).map((row) => row.name);
+  assert.deepEqual(columns, ['user_id', 'principal_id', 'ciphertext', 'updated_at']);
+  db.close();
+});
+
+test('engram_cloud_credentials.user_id is unique per user (one Cloud identity per admin)', () => {
+  const db = openDb(':memory:');
+  db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('dave', 'hash');
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (1, 'p1', 'cipher-a', datetime('now'))",
+  ).run();
+  assert.throws(() => {
+    db.prepare(
+      "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (1, 'p2', 'cipher-b', datetime('now'))",
+    ).run();
+  });
+  db.close();
+});
+
+test('deleting a user cascades to delete their engram_cloud_credentials row', () => {
+  const db = openDb(':memory:');
+  db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('erin', 'hash');
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (1, 'p1', 'cipher-a', datetime('now'))",
+  ).run();
+  db.prepare('DELETE FROM users WHERE id = 1').run();
+  const remaining = /** @type {{ n: number }} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM engram_cloud_credentials').get()
+  );
+  assert.equal(remaining.n, 0);
   db.close();
 });

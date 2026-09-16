@@ -115,3 +115,33 @@ export function issueToken({ principalId, name }) {
     body: name ? { name } : {},
   });
 }
+
+/**
+ * Logs a principal into Engram Cloud's own built-in dashboard
+ * (`POST /dashboard/login`) using THAT principal's own token — never the
+ * shared `ENGRAM_CLOUD_ADMIN_TOKEN` (Phase 5, per-admin SSO). Confirmed via
+ * deepwiki against engram's own source: the token goes in a `token` form
+ * field, NOT an Authorization header, and a successful login responds `303`
+ * (never followed here — `redirect: 'manual'`) carrying the
+ * `engram_dashboard_token` cookie this function hands back verbatim for the
+ * caller to relay to the browser.
+ * @param {string} token
+ * @returns {Promise<{ setCookie: string | null }>}
+ */
+export async function loginDashboard(token) {
+  const res = await fetch(`${getEngramCloudServerUrl()}/dashboard/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `token=${encodeURIComponent(token)}`,
+    redirect: 'manual',
+  });
+
+  // Deliberately no response-body interpolation in this message — a 401
+  // body could itself echo back caller input.
+  if (res.status !== 303) {
+    throw new Error(`engram-cloud dashboard login failed with status ${res.status}`);
+  }
+
+  const cookies = res.headers.getSetCookie();
+  return { setCookie: cookies.find((c) => c.startsWith('engram_dashboard_token=')) ?? null };
+}

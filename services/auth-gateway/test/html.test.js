@@ -31,10 +31,10 @@ test('escapeHtml renders a <script>-bearing value inert (R6)', () => {
   assert.equal(result, '&lt;script&gt;alert(document.cookie)&lt;/script&gt;');
 });
 
-test('ADMIN_PAGE_HEADERS carries every PAGE_HEADERS entry plus Referrer-Policy: no-referrer', () => {
+test('ADMIN_PAGE_HEADERS carries every PAGE_HEADERS entry plus Referrer-Policy: same-origin', () => {
   for (const [key, value] of Object.entries(PAGE_HEADERS)) {
     assert.equal(ADMIN_PAGE_HEADERS[key], value);
   }
-  assert.equal(ADMIN_PAGE_HEADERS['Referrer-Policy'], 'no-referrer');
+  assert.equal(ADMIN_PAGE_HEADERS['Referrer-Policy'], 'same-origin');
   assert.ok(Object.isFrozen(ADMIN_PAGE_HEADERS));
 });

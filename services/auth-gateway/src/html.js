@@ -49,6 +49,14 @@ button{font:inherit;padding:.5rem 1rem;border-radius:4px;border:1px solid curren
 .nav{display:flex;flex-wrap:wrap;align-items:center;gap:1rem;margin:0 0 1.5rem;font-size:.9rem}
 .nav form{margin:0}
 .nav button{padding:.25rem .75rem}
+.shell{display:grid;grid-template-columns:10rem 1fr;grid-template-rows:auto 1fr;gap:1rem;max-width:none}
+.shell-header{grid-column:1 / -1;display:flex;justify-content:space-between;align-items:center}
+.shell-header form{margin:0}
+.shell-sidebar{display:flex;flex-direction:column;gap:.5rem;font-size:.9rem}
+.shell-sidebar a{padding:.25rem .5rem;border-radius:4px;text-decoration:none;color:inherit}
+.shell-sidebar a.active{border:1px solid currentColor}
+.shell-main{max-width:none;margin:0}
+.shell-main iframe{width:100%;height:80vh;border:1px solid currentColor;border-radius:8px}
 `.trim();
 
 /**
@@ -99,5 +107,27 @@ export const PAGE_HEADERS = Object.freeze({
  */
 export const ADMIN_PAGE_HEADERS = Object.freeze({
   ...PAGE_HEADERS,
-  'Referrer-Policy': 'no-referrer',
+  // same-origin, not no-referrer (found live, 2026-09-16, via a broken
+  // logout button): no-referrer made Chrome send Origin: null on THIS
+  // page's own top-level form POSTs (logout, create-user, grants,
+  // tokens...), which the strict Origin/Referer CSRF check then rejects —
+  // the same Chromium quirk already fixed on the login page. same-origin
+  // still sends Referer to this same host (keeping that check working)
+  // while never leaking it to a third party a URL is pasted into.
+  'Referrer-Policy': 'same-origin',
+});
+
+/**
+ * ADMIN_PAGE_HEADERS plus `frame-src 'self'` — ONLY the console shell page
+ * (Phase 5, GET /admin/console) needs this: it is the sole page in this app
+ * that embeds an `<iframe>`. Every other admin page keeps the stricter
+ * `default-src 'none'` (no framing directive at all, which blocks any
+ * frame). `'self'` is sufficient (not a specific origin) since both framed
+ * targets — /monitor and /admin/engram-cloud/sso — are same-origin paths on
+ * this same host.
+ * @type {Record<string, string>}
+ */
+export const CONSOLE_PAGE_HEADERS = Object.freeze({
+  ...ADMIN_PAGE_HEADERS,
+  'Content-Security-Policy': `${ADMIN_PAGE_HEADERS['Content-Security-Policy']}; frame-src 'self'`,
 });

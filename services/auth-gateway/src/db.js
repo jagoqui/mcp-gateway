@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS atlassian_credentials (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS engram_cloud_credentials (
+  user_id      INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  principal_id TEXT NOT NULL,
+  ciphertext   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS admin_audit_log (
   id              INTEGER PRIMARY KEY,
   created_at      TEXT    NOT NULL DEFAULT (datetime('now')),

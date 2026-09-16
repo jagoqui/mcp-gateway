@@ -216,3 +216,95 @@ Caddy → auth-gateway → engram-cloud chain returned the two real managed
 users on this deployment. See tasks.md Phase 3 for the corrected
 route/payload shapes (those were already right, deepwiki-verified,
 untouched by this correction).
+
+## Phase 5: Console Shell + Per-Admin Engram Cloud SSO (new, 2026-09-16)
+
+Two pieces the original proposal named but never turned into a resolved
+design or tasks: (a) a shared header+sidebar+main shell so Monitor and
+Engram Cloud's own dashboard render inside one frame instead of two
+unrelated full-page products, (b) auto-login into Engram Cloud's own
+`/dashboard` using the SAME identity as the admin-panel session, so no
+admin ever sees Cloud's separate login screen.
+
+### SSO mechanism — confirmed via deepwiki against engram's own source
+
+`POST /dashboard/login` accepts a managed principal's own issued Bearer
+token as a `token` form field (NOT an `Authorization` header) and, on
+success, responds `303` with `Set-Cookie: engram_dashboard_token=...;
+Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=28800` (`Secure` follows
+`X-Forwarded-Proto`). A token issued to ANY managed principal — not just
+the bootstrap admin — works here; there is no admin-only restriction on
+dashboard login itself. This means auth-gateway can perform this login
+server-side on the admin's behalf and relay the resulting cookie, with
+zero client-side JS.
+
+### Identity model — explicit user decision (2026-09-16)
+
+Each admin-panel user gets their OWN Engram Cloud principal + token, not
+a shared identity. (Considered and rejected: reusing the single shared
+`ENGRAM_CLOUD_ADMIN_TOKEN` bootstrap-admin identity for every admin-panel
+user's SSO — simpler, zero new storage, but every admin would appear as
+the same Cloud principal, which the user explicitly did not want.)
+
+Storage mirrors this codebase's own existing precedent for exactly this
+shape of problem — `atlassian_credentials` (per-user, AES-256-GCM
+`ciphertext`, keyed by `user_id`, same `encrypt`/`decrypt` in
+`crypto.js`) — rather than inventing a new pattern:
+
+```sql
+CREATE TABLE IF NOT EXISTS engram_cloud_credentials (
+  user_id      INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  principal_id TEXT NOT NULL,
+  ciphertext   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+```
+
+`crypto.js`'s `encrypt`/`decrypt` are reused as-is (generic AES-256-GCM,
+not Atlassian-specific despite the `ATLASSIAN_ENC_KEY` env var name) —
+introducing a second encryption-key secret for one more per-user
+ciphertext column was judged not worth the extra `.env` provisioning
+step; the key material has no reason to be scoped per credential type.
+
+### Provisioning — lazy, on first SSO attempt
+
+`GET /admin/engram-cloud/sso` (nav-linked, authenticated admin session
+required, no CSRF token needed — a plain navigational GET, no state
+mutation of our own):
+
+1. Look up `engram_cloud_credentials` for the current admin session's
+   `user_id`. If present, skip to step 3.
+2. Not present → provision once, using the existing shared
+   `ENGRAM_CLOUD_ADMIN_TOKEN` purely as the PROVISIONING credential
+   (never as the identity that logs in): `createUser({username: <admin's
+   own username>, role: 'admin'})`, then `issueToken({principalId, name:
+   'console-sso'})`. Encrypt the raw token, store
+   `{user_id, principal_id, ciphertext, updated_at}`.
+3. Decrypt the stored token, `POST /dashboard/login` with it as the
+   `token` form field, `redirect: 'manual'` (capture the `Set-Cookie`
+   before fetch would otherwise follow the `303`).
+4. Re-set the exact same `Set-Cookie` on our own response (same host,
+   `engram-cloud.{$DOMAIN}` — the cookie's `Path=/dashboard` scope works
+   unmodified since Cloud's dashboard lives on this same origin).
+5. `302` to `/dashboard`.
+
+A create-user collision (an existing Cloud principal already has this
+admin's username, never linked to them here) surfaces as a clear error,
+not a silent failure or an unrelated principal's credential.
+
+### Layout shell
+
+No `X-Frame-Options` or CSP `frame-ancestors` on either Monitor or
+Cloud's dashboard (confirmed via deepwiki) — both can be framed. Neither
+is our own frontend source (Monitor: separate git-cloned repo; Cloud:
+vendored binary), so a true shared header+sidebar+main, not just
+matching chrome, needs `<iframe>` — the zero-JS admin panel cannot inject
+a common shell into either app's own JS bundle. A new
+`GET /admin/console?view=monitor|cloud` renders the shared zero-JS
+header+sidebar (real page navigations, not client-side tab state) with
+`<main><iframe src="/monitor"|"/admin/engram-cloud/sso"></iframe></main>`
+— the `cloud` view's iframe src IS the SSO route above, so opening that
+tab performs the login and lands the iframe on `/dashboard` in one step.
+
+Sequenced after SSO (this section) since the shell's `cloud` view depends
+on the SSO route existing first.

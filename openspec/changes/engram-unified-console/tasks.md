@@ -128,3 +128,23 @@ never a candidate for this change's automated apply/verify accounting.
 - [ ] 4.1 (external repo, human-applied) Add admin pages (list users, grant project, issue token) calling `/admin/engram-cloud/*`, matching existing component patterns (`organisms/`, `atoms/`), in the human's own clone of `github.com/egdev6/engram-monitor` — not this repository.
 - [ ] 4.2 (external repo, human-applied) Add a single-observation delete button (edit already works via the existing `useUpdateObservation`/`MarkdownPanel.tsx` wiring, confirmed in Phase 0.3 — nothing to do there), in that same external clone. No role signal needed from the frontend: the Caddy admin gate (Phase 2) already means anyone who reaches Monitor at all is an authenticated admin — Monitor's own code does not need to know or check a role.
 - [ ] 4.3 (external repo, human-applied) Human applies and pushes 4.1/4.2's changes to the vendored repo directly; this repo's own `Dockerfile`/`nginx.conf` changes from Phase 2 are what actually deploy whatever that clone contains.
+
+## Phase 5: Console Shell + Per-Admin Engram Cloud SSO (new, 2026-09-16, needs Phase 1 and Phase 3)
+
+User-requested, deferred from the original proposal to an open design
+question, resolved this session via deepwiki + an explicit identity-model
+decision (each admin gets their OWN Engram Cloud principal/token, not a
+shared one — see design.md Phase 5).
+
+- [x] 5.1 RED `test/db.test.js`: `engram_cloud_credentials` table exists with the right columns/FK/PK (4 new tests: table list, columns, PK uniqueness, cascade-on-delete).
+- [x] 5.2 GREEN: `src/db.js` — added `engram_cloud_credentials(user_id PK FK, principal_id, ciphertext, updated_at)`, mirroring `atlassian_credentials`'s shape exactly.
+- [x] 5.3 RED `test/engram-cloud-client.test.js`: `loginDashboard(token)` — form field not header, does not follow the redirect, returns the raw `Set-Cookie` value, never leaks the token in a thrown message (3 new tests). Empirically verified first (throwaway script) that Node's own `fetch` does NOT opaque-filter a `redirect: 'manual'` response — `res.headers.getSetCookie()` works as expected, no need to drop to raw `node:http`.
+- [x] 5.4 GREEN: `src/engram-cloud-client.js` — added `loginDashboard`.
+- [x] 5.5 GREEN: no separate credential-storage module — this codebase's own precedent (`atlassian_credentials` reads/writes are inline SQL in `app.js`/`verify.js`, not a dedicated module) was followed instead of the originally-planned separate file. `getEngramCloudCredential`/`saveEngramCloudCredential` are private functions in `admin-app.js`, reusing `crypto.js`'s `encrypt`/`decrypt` as-is.
+- [x] 5.6 RED `test/admin-app.test.js`: `GET /admin/engram-cloud/sso` — unauthenticated → 401, stub never hit; no stored credential → provisions (create user + issue token via the shared admin token), stores it encrypted, performs the dashboard login, relays `Set-Cookie`, redirects to `/dashboard`; stored credential → skips provisioning entirely, reuses the stored token; a create-user collision (409 from the stub) → clean `502 engram_cloud_sso_failed`, never a raw stack trace; regular non-admin session → 401 (5 new tests). Extended the existing `engram-cloud` test stub to support per-route canned responses (`engramCloudResponsesByRoute`) and a request log, since this flow makes 2-3 distinct upstream calls per test, unlike every earlier Phase 3 route.
+- [x] 5.7 GREEN: wired `handleGetEngramCloudSso` into `handleAdminRequest`.
+- [x] 5.8 Nav: `renderAdminNav`'s "Engram Cloud dashboard" and "Monitor" links now point at `/admin/console?view=cloud` and `/admin/console?view=monitor` (through the shell, not straight to the raw products) — required updating 2 pre-existing nav-rendering assertions in `admin-app.test.js` to match the new hrefs.
+- [x] 5.9 RED/GREEN: `GET /admin/console?view=monitor|cloud` — zero-JS `header`+`aside`(sidebar)+`main`>`iframe` shell (5 new tests: unauthenticated redirect, monitor view, cloud view, unrecognized-view default, `frame-src` CSP present). New `CONSOLE_PAGE_HEADERS` in `html.js` (`ADMIN_PAGE_HEADERS` + `frame-src 'self'` — the only page in this app that frames anything) and `.shell`/`.shell-header`/`.shell-sidebar`/`.shell-main` CSS in `SHARED_STYLE`.
+- [ ] 5.10 Manual E2E on this VPS: a real admin login → Engram Cloud nav link → provisions on first click, lands inside Cloud's own `/dashboard` with no second login prompt; a second admin gets a DIFFERENT Cloud principal, not the same one.
+
+Full suite: 360/360 `node --test` passing (up from 344 before this phase — 16 new tests across `db.test.js`, `engram-cloud-client.test.js`, and `admin-app.test.js`), lint clean.

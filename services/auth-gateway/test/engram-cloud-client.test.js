@@ -1,7 +1,13 @@
 import { test, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { listUsers, createUser, grantProject, issueToken } from '../src/engram-cloud-client.js';
+import {
+  listUsers,
+  createUser,
+  grantProject,
+  issueToken,
+  loginDashboard,
+} from '../src/engram-cloud-client.js';
 
 const ADMIN_TOKEN = 'test-engram-cloud-admin-token';
 
@@ -13,7 +19,7 @@ before(() => {
 let backend;
 /** @type {{ method?: string, url?: string, headers?: any, body?: string }} */
 let lastRequest;
-/** @type {{ status: number, body: any }} */
+/** @type {{ status: number, body: any, headers?: Record<string, string> }} */
 let nextResponse;
 
 beforeEach(async () => {
@@ -26,7 +32,10 @@ beforeEach(async () => {
     });
     req.on('end', () => {
       lastRequest = { method: req.method, url: req.url, headers: req.headers, body: raw };
-      res.writeHead(nextResponse.status, { 'Content-Type': 'application/json' });
+      res.writeHead(nextResponse.status, {
+        'Content-Type': 'application/json',
+        ...nextResponse.headers,
+      });
       res.end(JSON.stringify(nextResponse.body));
     });
   });
@@ -109,6 +118,48 @@ test('threat: a non-2xx response throws an Error whose message never contains th
       assert.ok(err instanceof Error);
       assert.ok(!err.message.includes(ADMIN_TOKEN));
       assert.ok(!JSON.stringify(err).includes(ADMIN_TOKEN));
+      return true;
+    },
+  );
+});
+
+test('loginDashboard posts the token as a form field, not an Authorization header', async () => {
+  nextResponse = {
+    status: 303,
+    body: {},
+    headers: {
+      Location: '/dashboard/',
+      'Set-Cookie': 'engram_dashboard_token=abc; Path=/dashboard; HttpOnly; SameSite=Lax',
+    },
+  };
+  await loginDashboard('a-principal-own-token');
+  assert.equal(lastRequest.method, 'POST');
+  assert.equal(lastRequest.url, '/dashboard/login');
+  assert.equal(lastRequest.headers['content-type'], 'application/x-www-form-urlencoded');
+  assert.equal(lastRequest.headers.authorization, undefined);
+  assert.equal(lastRequest.body, 'token=a-principal-own-token');
+});
+
+test('loginDashboard does not follow the 303 redirect and returns the raw Set-Cookie value', async () => {
+  nextResponse = {
+    status: 303,
+    body: {},
+    headers: {
+      Location: '/dashboard/',
+      'Set-Cookie': 'engram_dashboard_token=abc; Path=/dashboard; HttpOnly; SameSite=Lax',
+    },
+  };
+  const result = await loginDashboard('a-principal-own-token');
+  assert.equal(result.setCookie, 'engram_dashboard_token=abc; Path=/dashboard; HttpOnly; SameSite=Lax');
+});
+
+test('loginDashboard throws on a non-303 response, message never contains the token', async () => {
+  nextResponse = { status: 401, body: { error: 'invalid_token' } };
+  await assert.rejects(
+    () => loginDashboard('a-secret-value'),
+    (/** @type {any} */ err) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes('a-secret-value'));
       return true;
     },
   );

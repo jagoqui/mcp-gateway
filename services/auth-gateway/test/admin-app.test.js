@@ -624,7 +624,7 @@ test('a regular (non-admin) session cookie never authenticates GET /admin/users'
   assert.equal(res.status, 401);
 });
 
-test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/no-referrer header set and no <script>', async () => {
+test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/same-origin-referrer header set and no <script>', async () => {
   const { cookie } = loginAsAdmin();
   const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
   assert.equal(res.status, 200);
@@ -632,7 +632,14 @@ test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/no-referre
   assert.ok(res.headers.get('content-security-policy'));
   assert.equal(res.headers.get('cache-control'), 'no-store');
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+  // same-origin (not no-referrer): the earlier no-referrer value made Chrome
+  // send Origin: null on this page's own top-level form POSTs (logout,
+  // create-user, disable/enable, grants, tokens) — the same Chromium quirk
+  // already fixed on the login page, found live (2026-09-16) via logout.
+  // same-origin still sends Referer for requests to this same host (so the
+  // strict Origin/Referer CSRF check keeps working) while still never
+  // leaking it to a third party the URL might be pasted into (D10).
+  assert.equal(res.headers.get('referrer-policy'), 'same-origin');
   const body = await res.text();
   assert.ok(!body.includes('<script'));
 });
@@ -644,8 +651,10 @@ test('GET /admin/users renders a nav with Users/Dashboard/Monitor links and a Lo
   const { cookie } = loginAsAdmin();
   const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
   const body = await res.text();
-  assert.ok(body.includes('href="/dashboard"'));
-  assert.ok(body.includes('href="/monitor"'));
+  // Phase 5: these now route through the console shell (SSO + shared
+  // header/sidebar/main), not straight to /dashboard or /monitor.
+  assert.ok(body.includes('href="/admin/console?view=cloud"'));
+  assert.ok(body.includes('href="/admin/console?view=monitor"'));
   assert.ok(body.includes('action="/admin/logout"'));
 });
 
@@ -1125,8 +1134,8 @@ test("GET /admin/users/tokens lists a target user's tokens by label/created/last
   });
   assert.equal(res.status, 200);
   const body = await res.text();
-  assert.ok(body.includes('href="/dashboard"'));
-  assert.ok(body.includes('href="/monitor"'));
+  assert.ok(body.includes('href="/admin/console?view=cloud"'));
+  assert.ok(body.includes('href="/admin/console?view=monitor"'));
   assert.ok(body.includes('action="/admin/logout"'));
   assert.ok(body.includes('Tokens for token-target'));
   assert.ok(body.includes('phone'));
@@ -1664,6 +1673,14 @@ let engramCloudStub;
 let lastEngramCloudRequest;
 /** @type {{ status: number, body: any }} */
 let nextEngramCloudResponse;
+// SSO tests (Phase 5) exercise multiple distinct upstream calls in one
+// request (create user → issue token → dashboard login) — keyed here by
+// "METHOD path" so each gets its own canned response instead of sharing
+// nextEngramCloudResponse's single slot.
+/** @type {Record<string, { status: number, body?: any, headers?: Record<string, string> }>} */
+let engramCloudResponsesByRoute;
+/** @type {{ method?: string, url?: string, headers?: any, body?: string }[]} */
+let engramCloudRequestLog;
 
 before(() => {
   process.env.ENGRAM_CLOUD_ADMIN_TOKEN = ENGRAM_CLOUD_ADMIN_TOKEN;
@@ -1672,6 +1689,8 @@ before(() => {
 beforeEach(async () => {
   lastEngramCloudRequest = undefined;
   nextEngramCloudResponse = { status: 200, body: {} };
+  engramCloudResponsesByRoute = {};
+  engramCloudRequestLog = [];
   engramCloudStub = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => {
@@ -1684,8 +1703,15 @@ beforeEach(async () => {
         headers: req.headers,
         body: raw,
       };
-      res.writeHead(nextEngramCloudResponse.status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(nextEngramCloudResponse.body));
+      engramCloudRequestLog.push(lastEngramCloudRequest);
+      const routeKey = `${req.method} ${req.url?.split('?')[0]}`;
+      const routed = engramCloudResponsesByRoute[routeKey];
+      const response = routed ?? nextEngramCloudResponse;
+      res.writeHead(response.status, {
+        'Content-Type': 'application/json',
+        ...response.headers,
+      });
+      res.end(response.body !== undefined ? JSON.stringify(response.body) : '');
     });
   });
   await new Promise((resolve) => engramCloudStub.listen(0, '127.0.0.1', resolve));
@@ -1867,4 +1893,156 @@ test('when the upstream engram-cloud call fails, the proxy route surfaces a 502,
   assert.ok(!JSON.stringify(responseBody).includes(ENGRAM_CLOUD_ADMIN_TOKEN));
   // afterEach's own engramCloudStub.close() on an already-closed server is a
   // harmless no-op (Node's http.Server.close() tolerates a double-close).
+});
+
+// Phase 5 (engram-unified-console) — GET /admin/engram-cloud/sso: per-admin
+// SSO into Engram Cloud's own /dashboard. Provisions a Cloud identity on
+// first use (create user → issue token → save encrypted), then always
+// dashboard-logs-in with THIS admin's own stored token, never the shared
+// ENGRAM_CLOUD_ADMIN_TOKEN (design.md Phase 5's explicit identity decision).
+
+test('GET /admin/engram-cloud/sso with no admin cookie returns 401, stub never hit', async () => {
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, {
+    headers: { Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('GET /admin/engram-cloud/sso with no stored credential provisions one (create user, issue token), stores it encrypted, then dashboard-logs-in and redirects to /dashboard', async () => {
+  const { cookie, userId } = loginAsAdmin('sso-first-time-admin');
+  engramCloudResponsesByRoute['POST /admin/users'] = {
+    status: 201,
+    body: { principal_id: 'p-sso-1', username: 'sso-first-time-admin', role: 'admin' },
+  };
+  engramCloudResponsesByRoute['POST /admin/users/p-sso-1/tokens'] = {
+    status: 201,
+    body: { raw_token: 'freshly-issued-token', token: { id: 't1', principal_id: 'p-sso-1' } },
+  };
+  engramCloudResponsesByRoute['POST /dashboard/login'] = {
+    status: 303,
+    headers: {
+      Location: '/dashboard/',
+      'Set-Cookie': 'engram_dashboard_token=xyz; Path=/dashboard; HttpOnly; SameSite=Lax',
+    },
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, {
+    headers: { Cookie: cookie },
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/dashboard');
+  assert.equal(
+    res.headers.get('set-cookie'),
+    'engram_dashboard_token=xyz; Path=/dashboard; HttpOnly; SameSite=Lax',
+  );
+
+  const createCall = engramCloudRequestLog.find((r) => r.url === '/admin/users');
+  assert.equal(createCall.method, 'POST');
+  assert.deepEqual(JSON.parse(createCall.body), {
+    username: 'sso-first-time-admin',
+    role: 'admin',
+  });
+
+  const loginCall = engramCloudRequestLog.find((r) => r.url === '/dashboard/login');
+  assert.equal(loginCall.body, 'token=freshly-issued-token');
+
+  const { decrypt } = await import('../src/crypto.js');
+  const row = /** @type {any} */ (
+    db.prepare('SELECT principal_id, ciphertext FROM engram_cloud_credentials WHERE user_id = ?').get(userId)
+  );
+  assert.equal(row.principal_id, 'p-sso-1');
+  assert.equal(decrypt(row.ciphertext), 'freshly-issued-token');
+});
+
+test('GET /admin/engram-cloud/sso with an already-stored credential skips provisioning and reuses the stored token', async () => {
+  const { cookie, userId } = loginAsAdmin('sso-returning-admin');
+  const { encrypt } = await import('../src/crypto.js');
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(userId, 'p-sso-2', encrypt('already-issued-token'));
+
+  engramCloudResponsesByRoute['POST /dashboard/login'] = {
+    status: 303,
+    headers: {
+      Location: '/dashboard/',
+      'Set-Cookie': 'engram_dashboard_token=abc; Path=/dashboard; HttpOnly; SameSite=Lax',
+    },
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, {
+    headers: { Cookie: cookie },
+    redirect: 'manual',
+  });
+
+  assert.equal(res.status, 302);
+  assert.equal(engramCloudRequestLog.some((r) => r.url === '/admin/users'), false);
+  const loginCall = engramCloudRequestLog.find((r) => r.url === '/dashboard/login');
+  assert.equal(loginCall.body, 'token=already-issued-token');
+});
+
+test('GET /admin/engram-cloud/sso surfaces a clean error when provisioning fails (e.g. a username collision), never a raw stack trace', async () => {
+  const { cookie } = loginAsAdmin('sso-collision-admin');
+  engramCloudResponsesByRoute['POST /admin/users'] = {
+    status: 409,
+    body: { error: 'username_taken' },
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 502);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.error, 'engram_cloud_sso_failed');
+});
+
+test('a regular (non-admin) session cookie never authenticates GET /admin/engram-cloud/sso', async () => {
+  const regularId = insertUser({ username: 'engram-cloud-sso-regular-cookie-test', isAdmin: false });
+  const regularToken = createSessionToken({ uid: regularId }, SESSION_SECRET);
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, {
+    headers: { Cookie: `session=${regularToken}`, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+});
+
+// Phase 5 (engram-unified-console) — GET /admin/console: the shared
+// header+sidebar+main shell, Monitor/Cloud rendered inside via <iframe>.
+
+test('GET /admin/console unauthenticated (Accept: text/html) redirects to /admin/login', async () => {
+  const res = await fetch(`${baseUrl}/admin/console`, {
+    headers: { Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(res.headers.get('location').startsWith('/admin/login'));
+});
+
+test('GET /admin/console?view=monitor renders the shell with an iframe pointed at /monitor', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/console?view=monitor`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('<iframe src="/monitor"'));
+  assert.ok(!body.includes('<script'));
+});
+
+test('GET /admin/console?view=cloud renders the shell with an iframe pointed at the SSO route', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/console?view=cloud`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('<iframe src="/admin/engram-cloud/sso"'));
+});
+
+test('GET /admin/console with no/unrecognized view defaults to the monitor view', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/console?view=bogus`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('<iframe src="/monitor"'));
+});
+
+test('GET /admin/console carries a frame-src CSP directive (unlike every other admin page)', async () => {
+  const { cookie } = loginAsAdmin();
+  const res = await fetch(`${baseUrl}/admin/console`, { headers: { Cookie: cookie } });
+  assert.ok(res.headers.get('content-security-policy').includes("frame-src 'self'"));
 });
