@@ -21,6 +21,8 @@ import {
   getManagedUser,
   listTokensForUser,
   issueManagedToken,
+  revokeManagedToken,
+  regenerateToken,
 } from './user-admin.js';
 
 // Every subdomain the Caddyfile carves /admin/login* out of forward_auth
@@ -781,13 +783,212 @@ async function handlePostAdminTokensIssue(req, res, db, config) {
 }
 
 /**
+ * Steps 1-4 shared by POST /admin/tokens/revoke and POST
+ * /admin/tokens/regenerate: authenticate, strict Origin (D7), parse body,
+ * verify CSRF, then validate `userId` (redirects to /admin/users on
+ * failure — no known subpage yet at this point) and resolve it to a real
+ * eligible target via getManagedUser (redirects to /admin/users on failure
+ * too — the target page needs a valid userId to build a URL for). Returns
+ * `null` when the caller must stop (already responded); otherwise
+ * `{ isForm, data, userId, targetUser }` for the caller to validate its own
+ * remaining fields (tokenId) and mutate.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ * @returns {Promise<{ admin: any, isForm: boolean, data: Record<string, any>, userId: number, targetUser: any } | null>}
+ */
+async function beginTokenWrite(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return null;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return null;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return null;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  const csrfOk = verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret });
+  if (!csrfOk) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=csrf' });
+      res.end();
+      return null;
+    }
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return null;
+  }
+
+  const userId = Number(data?.userId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=invalid' });
+      res.end();
+      return null;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return null;
+  }
+
+  const targetUser = getManagedUser(db, userId);
+  if (!targetUser) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/users?error=not_found' });
+      res.end();
+      return null;
+    }
+    sendJson(res, 404, { error: 'user_not_found' });
+    return null;
+  }
+
+  return { admin, isForm, data, userId, targetUser };
+}
+
+/**
+ * POST /admin/tokens/revoke — no secret to show (unlike issue/regenerate),
+ * so every outcome redirects back to the target user's own token list
+ * (`/admin/users/tokens?userId=N`) rather than the generic `/admin/users`
+ * — once `userId` is known-valid (beginTokenWrite already confirmed it),
+ * staying on that page is strictly more useful than bouncing to the list.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminTokensRevoke(req, res, db, config) {
+  const begun = await beginTokenWrite(req, res, db, config);
+  if (!begun) {
+    return;
+  }
+  const { admin, isForm, data, userId } = begun;
+
+  const tokenId = Number(data?.tokenId);
+  if (!Number.isInteger(tokenId) || tokenId <= 0) {
+    if (isForm) {
+      res.writeHead(302, { Location: `/admin/users/tokens?userId=${userId}&error=invalid` });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  const revoked = revokeManagedToken(db, {
+    tokenId,
+    userId,
+    actorUserId: admin.id,
+    actorLabel: admin.username,
+  });
+  if (!revoked) {
+    if (isForm) {
+      res.writeHead(302, { Location: `/admin/users/tokens?userId=${userId}&error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'token_not_found' });
+    return;
+  }
+
+  if (isForm) {
+    res.writeHead(302, { Location: `/admin/users/tokens?userId=${userId}` });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * POST /admin/tokens/regenerate — calls the EXISTING regenerateToken
+ * (Unit 2), not a new wrapper: it already runs its own audited transaction
+ * (D8), just predating this file's `*Managed*` naming convention. It
+ * throws (rather than returning null/false) when the token isn't found,
+ * isn't owned by userId, or is already revoked — caught here exactly like
+ * handlePostAdminUsers already catches createManagedUser's duplicate-
+ * username throw.
+ *
+ * Like POST /admin/tokens/issue, the SUCCESS path renders the show-once
+ * page DIRECTLY (200), never a redirect (D10) — regenerate mints a new raw
+ * token exactly like issue does, so it needs the identical treatment;
+ * every failure path still redirects, matching revoke's convention above.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminTokensRegenerate(req, res, db, config) {
+  const begun = await beginTokenWrite(req, res, db, config);
+  if (!begun) {
+    return;
+  }
+  const { admin, isForm, data, userId, targetUser } = begun;
+
+  const tokenId = Number(data?.tokenId);
+  if (!Number.isInteger(tokenId) || tokenId <= 0) {
+    if (isForm) {
+      res.writeHead(302, { Location: `/admin/users/tokens?userId=${userId}&error=invalid` });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  /** @type {{ rawToken: string, newTokenId: number }} */
+  let result;
+  try {
+    result = regenerateToken(db, {
+      tokenId,
+      userId,
+      actorUserId: admin.id,
+      actorLabel: admin.username,
+    });
+  } catch {
+    // Token not found, not owned by userId, or already revoked.
+    if (isForm) {
+      res.writeHead(302, { Location: `/admin/users/tokens?userId=${userId}&error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'token_not_found' });
+    return;
+  }
+
+  if (isForm) {
+    res.writeHead(200, ADMIN_PAGE_HEADERS);
+    res.end(
+      renderTokenIssuedPage({ username: targetUser.username, userId, rawToken: result.rawToken }),
+    );
+    return;
+  }
+  sendJson(res, 200, { ok: true, rawToken: result.rawToken, tokenId: result.newTokenId });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
- * /admin/verify, /admin/login (GET+POST), /admin/logout, /admin/users
- * (GET+POST), /admin/users/disable+enable, /admin/users/tokens (GET), and
- * /admin/tokens/issue (POST) are implemented; every other /admin/* path
- * 404s until its own unit lands (Phase 11).
+ * Every route through Unit 11 is implemented; only Unit 12's Caddyfile
+ * wiring remains dormant. Every other /admin/* path 404s.
  * The authorization boundary is always this path prefix, never
  * req.headers.host (D2) — nothing in this dispatcher or authenticateAdmin
  * ever reads Host/X-Forwarded-Host.
@@ -848,6 +1049,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/tokens/issue') {
     await handlePostAdminTokensIssue(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/tokens/revoke') {
+    await handlePostAdminTokensRevoke(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/tokens/regenerate') {
+    await handlePostAdminTokensRegenerate(req, res, db, config);
     return true;
   }
 

@@ -95,17 +95,39 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
  * One row of the tokens table — label, created_at, last_used_at, and
  * revoked state (spec's View a User's Tokens requirement) — no token_hash
  * or raw token column exists in `listTokensForUser`'s projection at all,
- * so there is nothing here that could leak one even by mistake.
- * @param {{ label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }} token
+ * so there is nothing here that could leak one even by mistake. Revoke and
+ * Regenerate only render for an active token: revoking or regenerating an
+ * already-revoked one can never succeed
+ * (OWNED_ACTIVE_TOKEN_PREDICATE requires revoked_at IS NULL), so the panel
+ * never even offers the dead-end action.
+ * @param {{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }} token
+ * @param {number} userId
+ * @param {string} csrfToken
  * @returns {string}
  */
-function renderTokenRow(token) {
-  const badge = token.revoked_at ? 'revoked' : 'active';
+function renderTokenRow(token, userId, csrfToken) {
+  const active = !token.revoked_at;
+  const badge = active ? 'active' : 'revoked';
+  const actionsMarkup = active
+    ? `<form method="post" action="/admin/tokens/revoke">
+      <input type="hidden" name="userId" value="${userId}">
+      <input type="hidden" name="tokenId" value="${token.id}">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <button type="submit">Revoke</button>
+    </form>
+    <form method="post" action="/admin/tokens/regenerate">
+      <input type="hidden" name="userId" value="${userId}">
+      <input type="hidden" name="tokenId" value="${token.id}">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <button type="submit">Regenerate</button>
+    </form>`
+    : '';
   return `<tr>
     <td>${escapeHtml(token.label ?? '(no label)')}</td>
     <td>${escapeHtml(token.created_at)}</td>
     <td>${escapeHtml(token.last_used_at ?? 'never')}</td>
     <td><span class="badge">${badge}</span></td>
+    <td>${actionsMarkup}</td>
   </tr>`;
 }
 
@@ -118,7 +140,7 @@ function renderTokenRow(token) {
  * @param {{
  *   username: string,
  *   userId: number,
- *   tokens: Array<{ label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
+ *   tokens: Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
  *   csrfToken: string,
  *   errorCode?: string | null,
  * }} options
@@ -130,14 +152,14 @@ export function renderTokensPage({ username, userId, tokens, csrfToken, errorCod
       ? ADMIN_PANEL_ERRORS[errorCode]
       : null;
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
-  const rows = tokens.map(renderTokenRow).join('\n');
+  const rows = tokens.map((token) => renderTokenRow(token, userId, csrfToken)).join('\n');
   const body = `<main>
   <h1>Tokens for ${escapeHtml(username)}</h1>
   <p><a href="/admin/users">Back to users</a></p>
   ${errorMarkup}
   <table>
     <thead>
-      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th></tr>
+      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
       ${rows}

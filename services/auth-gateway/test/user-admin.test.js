@@ -15,6 +15,7 @@ import {
   setPassword,
   listTokensForUser,
   revokeTokenById,
+  revokeManagedToken,
   regenerateToken,
 } from '../src/user-admin.js';
 
@@ -459,6 +460,114 @@ test('revokeTokenById sets revoked_at only when the token belongs to userId', as
   assert.equal(revokeTokenById(db, { tokenId: tokenRow.id, userId: owner.id }), true);
   row = /** @type {any} */ (db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenRow.id));
   assert.ok(row.revoked_at);
+  db.close();
+});
+
+// Unit 11 — POST /admin/tokens/revoke's audited path.
+test('revokeManagedToken sets revoked_at and audits token.revoke', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin10',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createUser(db, { username: 'kara', password: 'irrelevant' });
+  issueToken(db, { userId: user.id, label: 'tablet' });
+  const tokenRow = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ?').get(user.id)
+  );
+
+  const result = revokeManagedToken(db, {
+    tokenId: tokenRow.id,
+    userId: user.id,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin10',
+  });
+  assert.equal(result, true);
+
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenRow.id));
+  assert.ok(row.revoked_at);
+
+  const auditRows = allAuditRows(db);
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'token.revoke');
+  assert.equal(auditRows[0].outcome, 'success');
+  assert.equal(auditRows[0].actor_user_id, admin.id);
+  assert.equal(auditRows[0].target_user_id, user.id);
+  assert.equal(auditRows[0].target_token_id, tokenRow.id);
+  db.close();
+});
+
+test("revokeManagedToken has no side effect on the target user's other tokens", async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin11',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const user = await createUser(db, { username: 'liam', password: 'irrelevant' });
+  issueToken(db, { userId: user.id, label: 'one' });
+  issueToken(db, { userId: user.id, label: 'two' });
+  const rows = /** @type {any[]} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? ORDER BY id').all(user.id)
+  );
+
+  revokeManagedToken(db, {
+    tokenId: rows[0].id,
+    userId: user.id,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin11',
+  });
+
+  const untouched = /** @type {any} */ (
+    db.prepare('SELECT * FROM tokens WHERE id = ?').get(rows[1].id)
+  );
+  assert.equal(untouched.revoked_at, null);
+  db.close();
+});
+
+test('revokeManagedToken against a token owned by a different user (A15) returns false, writes no audit row', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin12',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const owner = await createUser(db, { username: 'mona', password: 'irrelevant' });
+  const stranger = await createUser(db, { username: 'noah', password: 'irrelevant' });
+  issueToken(db, { userId: owner.id, label: 'desktop' });
+  const tokenRow = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ?').get(owner.id)
+  );
+
+  const result = revokeManagedToken(db, {
+    tokenId: tokenRow.id,
+    userId: stranger.id,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin12',
+  });
+  assert.equal(result, false);
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenRow.id));
+  assert.equal(row.revoked_at, null);
+  assert.equal(allAuditRows(db).length, 0);
+  db.close();
+});
+
+test('revokeManagedToken against the admin row as userId returns false, writes no audit row', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, {
+    username: 'root-admin13',
+    password: 'irrelevant',
+    isAdmin: true,
+  });
+  const result = revokeManagedToken(db, {
+    tokenId: 1,
+    userId: admin.id,
+    actorUserId: admin.id,
+    actorLabel: 'root-admin13',
+  });
+  assert.equal(result, false);
+  assert.equal(allAuditRows(db).length, 0);
   db.close();
 });
 

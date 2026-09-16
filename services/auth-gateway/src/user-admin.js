@@ -307,6 +307,54 @@ export function revokeTokenById(db, opts) {
 }
 
 /**
+ * revokeTokenById's audited counterpart (D8, same pattern as
+ * createManagedUser/setManagedUserDisabled/issueManagedToken above) — the
+ * admin panel's POST /admin/tokens/revoke uses this instead of the plain
+ * revokeTokenById, which stays unaudited for any other caller. Re-checks
+ * target eligibility (getManagedUser, is_admin=0) INSIDE the same
+ * transaction as the UPDATE, same reasoning as issueManagedToken — belt
+ * and braces on top of OWNED_ACTIVE_TOKEN_PREDICATE's user_id ownership
+ * check (A15), which is the real cross-user boundary either way.
+ *
+ * Deliberately NOT touching regenerateToken below to add the same
+ * eligibility re-check: it already has its own audited transaction from
+ * Unit 2, predating this file's `*Managed*` naming convention but
+ * following the identical D8 shape — admin-app.js's handler pre-checks
+ * eligibility via getManagedUser before calling it instead, matching how
+ * every GET route here already does.
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ tokenId: number, userId: number, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {boolean}
+ */
+export function revokeManagedToken(db, opts) {
+  const { tokenId, userId, actorUserId, actorLabel } = opts;
+  const runTransaction = db.transaction(() => {
+    const targetUser = getManagedUser(db, userId);
+    if (!targetUser) {
+      return false;
+    }
+    const result = db
+      .prepare(
+        `UPDATE tokens SET revoked_at = datetime('now') WHERE id = ? AND ${OWNED_ACTIVE_TOKEN_PREDICATE}`,
+      )
+      .run(tokenId, userId);
+    if (result.changes === 0) {
+      return false;
+    }
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'token.revoke',
+      outcome: 'success',
+      targetUserId: userId,
+      targetTokenId: tokenId,
+    });
+    return true;
+  });
+  return runTransaction();
+}
+
+/**
  * Issues a replacement token and revokes the original in one atomic
  * transaction (design's "Regenerate Transaction Shape"). Insert-new happens
  * before revoke-old, so a rollback always leaves the original token intact.

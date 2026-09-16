@@ -122,10 +122,11 @@ test('threat: a forged Host/X-Forwarded-Host header with no admin cookie never b
 
 // 5.5 — confirm an unrelated /admin/* path still 404s (dispatcher skeleton),
 // and every existing route on app.js is unaffected by the new branch.
-// /admin/tokens/revoke is Unit 11 — still genuinely unimplemented, unlike
-// /admin/users/tokens (Unit 10, GET) below.
+// Every named /admin/* route is implemented as of Unit 11 (only Unit 12's
+// Caddyfile wiring remains) — a made-up path is the only genuinely
+// unimplemented example left.
 test('an unimplemented /admin/* path returns 404, not a crash', async () => {
-  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, { method: 'POST' });
+  const res = await fetch(`${baseUrl}/admin/does-not-exist`);
   assert.equal(res.status, 404);
 });
 
@@ -1161,4 +1162,356 @@ test('a regular (non-admin) session cookie never authenticates GET /admin/users/
     headers: { Cookie: `session=${regularToken}`, Accept: 'application/json' },
   });
   assert.equal(res.status, 401);
+});
+
+// Phase 11 — POST /admin/tokens/revoke + POST /admin/tokens/regenerate
+
+/**
+ * @param {number} userId
+ * @returns {number} the inserted token's id
+ */
+function insertActiveToken(userId, label = null) {
+  const info = db
+    .prepare('INSERT INTO tokens (user_id, token_hash, label) VALUES (?, ?, ?)')
+    .run(userId, `hash-${crypto.randomUUID()}`, label);
+  return Number(info.lastInsertRowid);
+}
+
+test('POST /admin/tokens/revoke with a valid target sets revoked_at, redirects to the token list, and audits', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'revoke-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId, 'phone');
+
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), `/admin/users/tokens?userId=${targetId}`);
+
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenId));
+  assert.ok(row.revoked_at);
+
+  const auditRows = db.prepare('SELECT * FROM admin_audit_log').all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'token.revoke');
+});
+
+test("POST /admin/tokens/revoke has no side effect on the target user's other tokens", async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'revoke-sibling-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId, 'one');
+  const siblingId = insertActiveToken(targetId, 'two');
+
+  await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId), csrf }),
+  });
+
+  const sibling = /** @type {any} */ (
+    db.prepare('SELECT * FROM tokens WHERE id = ?').get(siblingId)
+  );
+  assert.equal(sibling.revoked_at, null);
+});
+
+test('threat: POST /admin/tokens/revoke targeting a token owned by a different user fails (A15), token untouched', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const owner = insertUser({ username: 'revoke-owner', isAdmin: false });
+  const stranger = insertUser({ username: 'revoke-stranger', isAdmin: false });
+  const tokenId = insertActiveToken(owner, 'desktop');
+
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(stranger), tokenId: String(tokenId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(
+    res.headers.get('location'),
+    `/admin/users/tokens?userId=${stranger}&error=not_found`,
+  );
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenId));
+  assert.equal(row.revoked_at, null);
+});
+
+test('POST /admin/tokens/revoke with an unknown tokenId redirects with error=not_found', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'revoke-unknown-token-target', isAdmin: false });
+
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: '999999', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(
+    res.headers.get('location'),
+    `/admin/users/tokens?userId=${targetId}&error=not_found`,
+  );
+});
+
+test("POST /admin/tokens/revoke targeting the admin's own id as userId redirects to /admin/users?error=not_found", async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(userId), tokenId: '1', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=not_found');
+});
+
+test('POST /admin/tokens/revoke with a mismatched Origin returns 403, before touching the database', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'revoke-origin-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId);
+
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId), csrf }),
+  });
+  assert.equal(res.status, 403);
+  const row = /** @type {any} */ (db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenId));
+  assert.equal(row.revoked_at, null);
+});
+
+test('POST /admin/tokens/revoke with a missing CSRF token redirects to /admin/users?error=csrf', async () => {
+  const { cookie } = loginAsAdmin();
+  const targetId = insertUser({ username: 'revoke-csrf-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId);
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId) }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=csrf');
+});
+
+test('POST /admin/tokens/revoke with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ userId: '1', tokenId: '1' }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test('POST /admin/tokens/regenerate replaces the token atomically and renders the new raw value exactly once', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'regenerate-target', isAdmin: false });
+  const oldTokenId = insertActiveToken(targetId, 'ci-runner');
+
+  const res = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(oldTokenId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Copy this token now'));
+
+  const oldRow = /** @type {any} */ (
+    db.prepare('SELECT * FROM tokens WHERE id = ?').get(oldTokenId)
+  );
+  assert.ok(oldRow.revoked_at);
+  const activeCount = /** @type {any} */ (
+    db
+      .prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL')
+      .get(targetId)
+  ).n;
+  assert.equal(activeCount, 1);
+
+  const auditRows = db.prepare('SELECT * FROM admin_audit_log').all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, 'token.regenerate');
+});
+
+test('POST /admin/tokens/regenerate as JSON returns the new raw token in the response body', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'regenerate-json-target', isAdmin: false });
+  const oldTokenId = insertActiveToken(targetId);
+
+  const res = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ userId: targetId, tokenId: oldTokenId, csrf }),
+  });
+  assert.equal(res.status, 200);
+  const responseBody = /** @type {any} */ (await res.json());
+  assert.equal(typeof responseBody.rawToken, 'string');
+  assert.ok(responseBody.rawToken.length >= 32);
+});
+
+test('POST /admin/tokens/regenerate on an already-revoked token fails cleanly, no new token created', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'regenerate-revoked-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId);
+  db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE id = ?").run(tokenId);
+
+  const res = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(
+    res.headers.get('location'),
+    `/admin/users/tokens?userId=${targetId}&error=not_found`,
+  );
+  const count = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ?').get(targetId)
+  ).n;
+  assert.equal(count, 1);
+});
+
+test('POST /admin/tokens/regenerate with a mismatched Origin returns 403, before touching the database', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const targetId = insertUser({ username: 'regenerate-origin-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId);
+
+  const res = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId), csrf }),
+  });
+  assert.equal(res.status, 403);
+  const count = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ?').get(targetId)
+  ).n;
+  assert.equal(count, 1);
+});
+
+test('POST /admin/tokens/regenerate with a missing CSRF token redirects to /admin/users?error=csrf', async () => {
+  const { cookie } = loginAsAdmin();
+  const targetId = insertUser({ username: 'regenerate-csrf-target', isAdmin: false });
+  const tokenId = insertActiveToken(targetId);
+  const res = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId) }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users?error=csrf');
+});
+
+test('POST /admin/tokens/regenerate with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ userId: '1', tokenId: '1' }),
+  });
+  assert.equal(res.status, 401);
+});
+
+test('a regular (non-admin) session cookie never authenticates POST /admin/tokens/revoke or /regenerate', async () => {
+  const targetId = insertUser({ username: 'tokens-regular-cookie-revoke', isAdmin: false });
+  const regularToken = createSessionToken({ uid: targetId }, SESSION_SECRET);
+  const tokenId = insertActiveToken(targetId);
+
+  const revokeRes = await fetch(`${baseUrl}/admin/tokens/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: `session=${regularToken}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId) }),
+  });
+  assert.equal(revokeRes.status, 401);
+
+  const regenerateRes = await fetch(`${baseUrl}/admin/tokens/regenerate`, {
+    method: 'POST',
+    headers: {
+      Cookie: `session=${regularToken}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), tokenId: String(tokenId) }),
+  });
+  assert.equal(regenerateRes.status, 401);
+});
+
+test('GET /admin/users/tokens renders a per-row Revoke/Regenerate form for an active token and none for a revoked one', async () => {
+  const { cookie } = loginAsAdmin();
+  const targetId = insertUser({ username: 'tokens-actions-render-target', isAdmin: false });
+  insertActiveToken(targetId, 'active-one');
+  const revokedTokenId = insertActiveToken(targetId, 'revoked-one');
+  db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE id = ?").run(revokedTokenId);
+
+  const res = await fetch(`${baseUrl}/admin/users/tokens?userId=${targetId}`, {
+    headers: { Cookie: cookie },
+  });
+  const body = await res.text();
+  assert.ok(body.includes('action="/admin/tokens/revoke"'));
+  assert.ok(body.includes('action="/admin/tokens/regenerate"'));
+  // Exactly one active token → exactly one Revoke form, none for the revoked one.
+  assert.equal(body.split('action="/admin/tokens/revoke"').length - 1, 1);
 });
