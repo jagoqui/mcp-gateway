@@ -120,26 +120,47 @@ function renderUserRow(user, csrfToken) {
 }
 
 /**
+ * One row of the admin-panel accounts table — username, role, status.
+ * `role`/`disabled_at` are server-sourced (listAdminAccounts), still
+ * escaped (A12 precedent).
+ * @param {{ username: string, role: string, disabled_at: string | null }} account
+ * @returns {string}
+ */
+function renderAdminAccountRow(account) {
+  const status = account.disabled_at ? 'disabled' : 'active';
+  return `<tr>
+    <td>${escapeHtml(account.username)}</td>
+    <td>${escapeHtml(account.role)}</td>
+    <td><span class="badge">${status}</span></td>
+  </tr>`;
+}
+
+/**
  * Renders the zero-JavaScript `/admin/users` page: the regular-user list
- * with a token-count summary, plus the create-user form. `isAdmin` is
- * never a field on this form (design.md's Create a Regular User
- * requirement) — the handler that posts here forces is_admin=0
- * unconditionally, so there is nothing here for a submitted body field to
- * override even if one were added.
+ * with a token-count summary, the create-user form, and (user-requested,
+ * 2026-09-17) a read-only list of admin-panel accounts themselves
+ * (admin/member, admin-identity-unification) with their role — previously
+ * invisible anywhere in the UI. `isAdmin` is never a field on the
+ * create-user form (design.md's Create a Regular User requirement) — the
+ * handler that posts here forces is_admin=0 unconditionally, so there is
+ * nothing here for a submitted body field to override even if one were
+ * added.
  * @param {{
  *   users: Array<{ id: number, username: string, created_at: string, disabled_at: string | null, active_token_count: number, revoked_token_count: number }>,
+ *   adminAccounts?: Array<{ id: number, username: string, role: string, created_at: string, disabled_at: string | null }>,
  *   csrfToken: string,
  *   errorCode?: string | null,
  * }} options
  * @returns {string}
  */
-export function renderUsersPage({ users, csrfToken, errorCode }) {
+export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCode }) {
   const errorMessage =
     errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
       ? ADMIN_PANEL_ERRORS[errorCode]
       : null;
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
   const rows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
+  const adminAccountRows = adminAccounts.map((account) => renderAdminAccountRow(account)).join('\n');
   const body = `<main>
   ${renderAdminNav(csrfToken)}
   <h1>Users</h1>
@@ -162,6 +183,18 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
     <label>Confirm password <input type="password" name="passwordConfirm" required autocomplete="new-password"></label>
     <button type="submit">Create user</button>
   </form>
+  <h2>Admin panel accounts</h2>
+  <p class="note">Who can log into this panel, and with which role (Import from Engram Cloud, above, links each to a Cloud principal).</p>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Username</th><th>Role</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      ${adminAccountRows}
+    </tbody>
+  </table>
+  </div>
 </main>`;
   return renderDocument({ title: 'Admin — Users', body });
 }

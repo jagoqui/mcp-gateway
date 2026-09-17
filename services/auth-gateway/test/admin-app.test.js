@@ -651,6 +651,21 @@ test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/same-origi
   assert.ok(!body.includes('<script'));
 });
 
+// User-requested (2026-09-17): admin-panel accounts (admin/member, the
+// ones created via login/import/bin/admin.js --admin) and their role
+// were invisible anywhere in the UI — GET /admin/users now also lists
+// them, distinct from the regular-gateway-users table already there.
+test('GET /admin/users also lists admin-panel accounts with their role', async () => {
+  const { cookie } = loginAsAdmin('roles-list-viewer');
+  db.prepare("INSERT INTO users (username, password_hash, is_admin, role) VALUES ('some-member', 'hash', 1, 'member')").run();
+
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('roles-list-viewer'));
+  assert.ok(body.includes('some-member'));
+  assert.ok(body.includes('member'));
+});
+
 // Found live (2026-09-16): POST /admin/logout has existed since Unit 7,
 // but no rendered page ever offered a way to trigger it, nor a way to
 // reach /dashboard or /monitor without leaving the admin panel first.
@@ -665,8 +680,8 @@ test('GET /admin/users renders a nav with Users/Dashboard/Monitor links and a Lo
   assert.ok(body.includes('action="/admin/logout"'));
 });
 
-test('GET /admin/users lists only is_admin=0 users, with disabled state and token counts, never admin rows', async () => {
-  const { cookie } = loginAsAdmin();
+test('GET /admin/users lists only is_admin=0 users in the regular-users table, with disabled state and token counts', async () => {
+  const { cookie } = loginAsAdmin('roles-not-in-regular-list-viewer');
   const regularId = insertUser({ username: 'regular-listed', isAdmin: false });
   insertUser({ username: 'disabled-listed', isAdmin: false, disabled: true });
   db.prepare('INSERT INTO tokens (user_id, token_hash) VALUES (?, ?)').run(
@@ -681,7 +696,12 @@ test('GET /admin/users lists only is_admin=0 users, with disabled state and toke
   const body = await res.text();
   assert.ok(body.includes('regular-listed'));
   assert.ok(body.includes('disabled-listed'));
-  assert.ok(!body.includes('unit8-admin'));
+  // The logged-in admin's own username now legitimately appears exactly
+  // once — in the separate "Admin panel accounts" table (below), never
+  // duplicated into the regular-users table this test is actually
+  // scoped to.
+  const occurrences = body.split('roles-not-in-regular-list-viewer').length - 1;
+  assert.equal(occurrences, 1);
 });
 
 test('threat: a malicious username is HTML-escaped in the rendered users list, not live markup (A12)', async () => {
@@ -2247,8 +2267,15 @@ test('POST /admin/engram-cloud/import with no admin cookie returns 401', async (
 // admin-identity-unification, Unit 3 — member role: only the Engram Cloud
 // SSO surface is reachable; everything else stays admin-only.
 
-test('POST /admin/login succeeds for a role=member account, same as admin', async () => {
+test('POST /admin/login succeeds for a role=member account, redirects to the console cloud view (not /admin/users, which would just 403)', async () => {
   const { username, password } = await createRealAdmin('login-member', 'member');
+  const res = await postAdminLogin({ username, password });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/console?view=cloud');
+});
+
+test('POST /admin/login still redirects an admin to /admin/users, unchanged', async () => {
+  const { username, password } = await createRealAdmin('login-admin-redirect-check');
   const res = await postAdminLogin({ username, password });
   assert.equal(res.status, 302);
   assert.equal(res.headers.get('location'), '/admin/users');

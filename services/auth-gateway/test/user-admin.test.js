@@ -13,6 +13,7 @@ import {
   getManagedUser,
   revokeToken,
   listManagedUsers,
+  listAdminAccounts,
   setUserDisabled,
   setManagedUserDisabled,
   setPassword,
@@ -268,6 +269,29 @@ test('listManagedUsers excludes admin rows, orders COLLATE NOCASE, and carries t
 
   for (const row of rows) {
     assert.equal(Object.prototype.hasOwnProperty.call(row, 'token_hash'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(row, 'password_hash'), false);
+  }
+  db.close();
+});
+
+// admin-identity-unification, Unit 3 follow-up — listAdminAccounts: the
+// mirror of listManagedUsers for the admin-panel accounts themselves
+// (is_admin=1), each with its role. User-requested (2026-09-17): admin/
+// member accounts and their role were invisible anywhere in the UI.
+test('listAdminAccounts lists only is_admin=1 rows, with role, ordered COLLATE NOCASE, no password_hash', async () => {
+  const db = openDb(':memory:');
+  await createUser(db, { username: 'zed-member', password: 'irrelevant', isAdmin: true, role: 'member' });
+  await createUser(db, { username: 'Amy-admin', password: 'irrelevant', isAdmin: true, role: 'admin' });
+  await createUser(db, { username: 'not-an-admin', password: 'irrelevant' });
+
+  const rows = listAdminAccounts(db);
+  assert.deepEqual(
+    rows.map((r) => r.username),
+    ['Amy-admin', 'zed-member'],
+  );
+  assert.equal(rows.find((r) => r.username === 'Amy-admin').role, 'admin');
+  assert.equal(rows.find((r) => r.username === 'zed-member').role, 'member');
+  for (const row of rows) {
     assert.equal(Object.prototype.hasOwnProperty.call(row, 'password_hash'), false);
   }
   db.close();

@@ -106,3 +106,34 @@ Full suite after Unit 3: 382/382 `node --test` passing (up from 372), lint clean
 - [x] 3.3 Verified with a throwaway admin account (`resilience-test-temp`, disabled afterward — not deleted, `admin_audit_log.actor_user_id` is `ON DELETE RESTRICT` by design and correctly refused the delete, preserving its audit rows): stopped `engram-cloud`, logged in — 302 success in 276ms, no `engram_cloud_credentials` row created (provisioning failed fast and was swallowed, exactly per design.md D2). Restarted `engram-cloud`, logged in again — this time the link WAS provisioned, confirming the SSO route's self-healing behavior on the very next login, not just on a manual Cloud-nav visit.
 
 All three units and manual E2E for admin-identity-unification are now complete.
+
+## Phase 4: Follow-ups Found Live (2026-09-17)
+
+Two real issues surfaced immediately after deploying Unit 3, both fixed
+same-day:
+
+- [x] 4.1 **Migration bug**: `CREATE TABLE IF NOT EXISTS` is a no-op
+  against a table that already exists — it never added `role` to the
+  production `users` table, so every pre-existing admin (including real
+  ones) got `403 admin_role_required`. Fixed with an explicit
+  `migrateAddUsersRoleColumn` (`PRAGMA table_info` check + `ALTER TABLE
+  ADD COLUMN`), backfilling every existing row to `'admin'`. New
+  `db.test.js` regression test simulates a pre-existing table to prove
+  the migration actually runs. Verified live: production `users` table
+  gained the column, all 4 existing rows correctly backfilled to admin.
+- [x] 4.2 **Login redirect ignored role**: `POST /admin/login`'s success
+  fallback was hardcoded `/admin/users`, which a member would just get
+  403'd from immediately (`rejectNonAdminRole`). Now role-aware: a
+  member's fallback is `/admin/console?view=cloud`, the only surface
+  they can actually use; an admin's fallback is unchanged.
+- [x] 4.3 **Admin/member accounts invisible in the UI**: nothing ever
+  listed admin-panel accounts (as opposed to regular gateway users) or
+  their role. `GET /admin/users` now also renders a second, read-only
+  "Admin panel accounts" table (new `listAdminAccounts`, mirroring
+  `listManagedUsers` for `is_admin = 1` rows) — username, role, status.
+
+Also: mobile responsiveness (shell stacks to one column under 640px,
+tables scroll horizontally in a contained wrapper instead of the whole
+page) — user-requested, pure CSS, no schema/route changes.
+
+Full suite: 386/386 `node --test` passing, lint clean.

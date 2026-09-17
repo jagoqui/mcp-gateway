@@ -11,17 +11,20 @@ const OWNED_ACTIVE_TOKEN_PREDICATE = 'user_id = ? AND revoked_at IS NULL';
 
 /**
  * Creates a user with a bcrypt-hashed password. Ported verbatim from
- * bin/admin.js (D11); bin/admin.js re-exports this in Unit 3.
+ * bin/admin.js (D11); bin/admin.js re-exports this in Unit 3. `role` only
+ * matters for an admin (`isAdmin: true`) account — it is the same
+ * admin/member distinction Unit 3 introduced elsewhere, exposed here too
+ * so `bin/admin.js create-user` can provision a member directly.
  * @param {import('better-sqlite3').Database} db
- * @param {{ username: string, password: string, isAdmin?: boolean }} opts
+ * @param {{ username: string, password: string, isAdmin?: boolean, role?: string }} opts
  * @returns {Promise<{ id: number, username: string }>}
  */
 export async function createUser(db, opts) {
-  const { username, password, isAdmin = false } = opts;
+  const { username, password, isAdmin = false, role = 'admin' } = opts;
   const passwordHash = await hashPassword(password);
   const info = db
-    .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)')
-    .run(username, passwordHash, isAdmin ? 1 : 0);
+    .prepare('INSERT INTO users (username, password_hash, is_admin, role) VALUES (?, ?, ?, ?)')
+    .run(username, passwordHash, isAdmin ? 1 : 0, role);
   return { id: Number(info.lastInsertRowid), username };
 }
 
@@ -313,6 +316,30 @@ export function listManagedUsers(db) {
        WHERE u.is_admin = 0
        GROUP BY u.id
        ORDER BY u.username COLLATE NOCASE`,
+      )
+      .all()
+  );
+}
+
+/**
+ * Lists every admin-panel account (is_admin=1) — the mirror of
+ * listManagedUsers for the accounts that can log into this panel itself
+ * (admin-identity-unification Unit 3), each with its admin/member role.
+ * User-requested (2026-09-17): these accounts and their role were
+ * previously invisible anywhere in the UI. No token-count join — the
+ * per-user Bearer tokens `listManagedUsers` counts are for regular
+ * gateway users, a wholly separate concept from an admin-panel login.
+ * @param {import('better-sqlite3').Database} db
+ * @returns {Array<{ id: number, username: string, role: string, created_at: string, disabled_at: string | null }>}
+ */
+export function listAdminAccounts(db) {
+  return /** @type {any[]} */ (
+    db
+      .prepare(
+        `SELECT id, username, role, created_at, disabled_at
+       FROM users
+       WHERE is_admin = 1
+       ORDER BY username COLLATE NOCASE`,
       )
       .all()
   );

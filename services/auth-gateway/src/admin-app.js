@@ -22,6 +22,7 @@ import { createLoginThrottle } from './admin-throttle.js';
 import { recordAudit } from './admin-audit.js';
 import {
   listManagedUsers,
+  listAdminAccounts,
   createManagedUser,
   setManagedUserDisabled,
   getManagedUser,
@@ -374,11 +375,13 @@ async function handlePostAdminLogin(req, res, db, config) {
   }
 
   if (isForm) {
-    // '/admin/users' fallback, not sanitizeNext's default '/credentials' —
-    // must match the hidden `next` field renderAdminLoginPage rendered on
-    // the form the admin just submitted, or a plain admin/login with no
-    // explicit next lands them on the wrong panel after a successful login.
-    res.writeHead(302, { Location: sanitizeNext(next, '/admin/users') });
+    // Role-aware fallback (Unit 3), not sanitizeNext's default
+    // '/credentials': a member landing on /admin/users would just get
+    // rejectNonAdminRole's 403 — the console's cloud view is the only
+    // surface a member can actually use, so that is the fallback for
+    // them instead. An admin's fallback is unchanged from before.
+    const fallback = user.role === 'admin' ? '/admin/users' : '/admin/console?view=cloud';
+    res.writeHead(302, { Location: sanitizeNext(next, fallback) });
     res.end();
     return;
   }
@@ -487,10 +490,11 @@ function handleGetAdminUsers(req, res, db, url) {
   }
 
   const users = listManagedUsers(db);
+  const adminAccounts = listAdminAccounts(db);
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   const errorCode = url.searchParams.get('error');
   res.writeHead(200, ADMIN_PAGE_HEADERS);
-  res.end(renderUsersPage({ users, csrfToken, errorCode }));
+  res.end(renderUsersPage({ users, adminAccounts, csrfToken, errorCode }));
 }
 
 /**
