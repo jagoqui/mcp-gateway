@@ -15,6 +15,7 @@ import {
   renderTokensPage,
   renderTokenIssuedPage,
   renderConsolePage,
+  renderImportPage,
 } from './admin-panel.js';
 import { isAcceptableOrigin, verifyAdminCsrfToken, issueAdminCsrfToken } from './csrf.js';
 import { createLoginThrottle } from './admin-throttle.js';
@@ -28,6 +29,7 @@ import {
   issueManagedToken,
   revokeManagedToken,
   regenerateToken,
+  importEngramCloudPrincipal,
 } from './user-admin.js';
 import {
   listUsers as listEngramCloudUsers,
@@ -336,6 +338,18 @@ async function handlePostAdminLogin(req, res, db, config) {
   const adminSecret = getAdminSessionSecret();
   const token = createAdminSessionToken(user.id, adminSecret);
   res.setHeader('Set-Cookie', serializeAdminSessionCookie(token));
+
+  // admin-identity-unification D2: awaited, but never lets an Engram Cloud
+  // failure (unreachable, create-user collision, ...) affect whether THIS
+  // login succeeds — the session cookie above is already set regardless.
+  // A no-op for every login after the admin's first (ensureEngramCloudLink
+  // reads the existing row instead of provisioning again).
+  try {
+    await ensureEngramCloudLink(db, user);
+  } catch {
+    // Deliberately swallowed — see D2. GET /admin/engram-cloud/sso remains
+    // the self-healing retry path if this attempt failed.
+  }
 
   if (isForm) {
     // '/admin/users' fallback, not sanitizeNext's default '/credentials' —
@@ -1259,14 +1273,42 @@ function saveEngramCloudCredential(db, { userId, principalId, token }) {
 }
 
 /**
+ * Returns this admin's own Engram Cloud token, provisioning one (create
+ * user + issue token + encrypted store) if this is their first time —
+ * extracted from Phase 5's `GET /admin/engram-cloud/sso` (D1/D11: no
+ * second implementation) so `handlePostAdminLogin` can reuse it exactly.
+ * Never the shared `ENGRAM_CLOUD_ADMIN_TOKEN` (Phase 5's explicit identity
+ * decision: every admin must appear as their own distinct Cloud principal).
+ * Throws on any failure (network, create-user collision, ...) — callers
+ * decide what "failure to link" means for their own route.
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ id: number, username: string }} admin
+ * @returns {Promise<string>}
+ */
+async function ensureEngramCloudLink(db, admin) {
+  const existing = getEngramCloudCredential(db, admin.id);
+  if (existing) {
+    return existing;
+  }
+  const created = await createEngramCloudUser({ username: admin.username, role: 'admin' });
+  const issued = await issueEngramCloudToken({
+    principalId: created.principal_id,
+    name: 'console-sso',
+  });
+  saveEngramCloudCredential(db, {
+    userId: admin.id,
+    principalId: created.principal_id,
+    token: issued.raw_token,
+  });
+  return issued.raw_token;
+}
+
+/**
  * GET /admin/engram-cloud/sso — per-admin auto-login into Engram Cloud's
  * own built-in dashboard (Phase 5). A plain navigational GET (no state
  * mutation of our own tables beyond lazily provisioning a Cloud identity
  * the first time), so no CSRF/Origin check — matches every other read-only
- * admin GET route. Provisions once, on first use, then always dashboard-
- * logs-in with THIS admin's own stored token — never the shared
- * ENGRAM_CLOUD_ADMIN_TOKEN (design.md Phase 5's explicit identity decision:
- * every admin must appear as their own distinct Cloud principal).
+ * admin GET route.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
@@ -1280,21 +1322,7 @@ async function handleGetEngramCloudSso(req, res, db) {
   }
 
   try {
-    let token = getEngramCloudCredential(db, admin.id);
-    if (!token) {
-      const created = await createEngramCloudUser({ username: admin.username, role: 'admin' });
-      const issued = await issueEngramCloudToken({
-        principalId: created.principal_id,
-        name: 'console-sso',
-      });
-      token = issued.raw_token;
-      saveEngramCloudCredential(db, {
-        userId: admin.id,
-        principalId: created.principal_id,
-        token,
-      });
-    }
-
+    const token = await ensureEngramCloudLink(db, admin);
     const { setCookie } = await loginEngramCloudDashboard(token);
     if (setCookie) {
       res.setHeader('Set-Cookie', setCookie);
@@ -1307,6 +1335,179 @@ async function handleGetEngramCloudSso(req, res, db) {
     // upstream, and a dashboard-login rejection all surface identically.
     sendJson(res, 502, { error: 'engram_cloud_sso_failed' });
   }
+}
+
+/**
+ * GET /admin/engram-cloud/import (admin-identity-unification) — lists
+ * every Engram Cloud principal absent from `engram_cloud_credentials`
+ * (design.md D5: computed fresh via set difference, no cached flag).
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {URL} url
+ */
+async function handleGetEngramCloudImport(req, res, db, url) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/admin/login?next=%2Fadmin%2Fengram-cloud%2Fimport' });
+      res.end();
+      return;
+    }
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  /** @type {any[]} */
+  let cloudUsers;
+  try {
+    cloudUsers = await listEngramCloudUsers();
+  } catch {
+    sendJson(res, 502, { error: 'engram_cloud_unreachable' });
+    return;
+  }
+
+  const linkedPrincipalIds = new Set(
+    /** @type {any[]} */ (db.prepare('SELECT principal_id FROM engram_cloud_credentials').all()).map(
+      (row) => row.principal_id,
+    ),
+  );
+  const unlinked = cloudUsers.filter((user) => !linkedPrincipalIds.has(user.principal_id));
+
+  const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
+  res.writeHead(200, ADMIN_PAGE_HEADERS);
+  res.end(
+    renderImportPage({
+      principals: unlinked,
+      csrfToken,
+      errorCode: url.searchParams.get('error'),
+    }),
+  );
+}
+
+/**
+ * POST /admin/engram-cloud/import (admin-identity-unification) — the full
+ * 5-step admin write guard, then issues the chosen principal a fresh
+ * Engram Cloud token and creates its local account
+ * (`importEngramCloudPrincipal`, D4/D8) in one go.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostEngramCloudImport(req, res, db, config) {
+  // 1. Authenticate.
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  // 2. Origin check — strict (D7), same reasoning as every other admin write.
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  // 3. Parse body.
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  // 4. CSRF token.
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/engram-cloud/import?error=csrf' });
+      res.end();
+      return;
+    }
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  // 5. Validate, issue a token for the chosen principal, then create the
+  // local account + link atomically (importEngramCloudPrincipal, D4/D8).
+  const { principalId, username, password, passwordConfirm } = data ?? {};
+  if (
+    typeof principalId !== 'string' ||
+    !principalId ||
+    typeof username !== 'string' ||
+    !username ||
+    typeof password !== 'string' ||
+    !password
+  ) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/engram-cloud/import?error=invalid' });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  if (isForm && password !== passwordConfirm) {
+    res.writeHead(302, { Location: '/admin/engram-cloud/import?error=mismatch' });
+    res.end();
+    return;
+  }
+
+  /** @type {any} */
+  let issued;
+  try {
+    issued = await issueEngramCloudToken({ principalId, name: 'console-import' });
+  } catch {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/engram-cloud/import?error=unreachable' });
+      res.end();
+      return;
+    }
+    sendJson(res, 502, { error: 'engram_cloud_unreachable' });
+    return;
+  }
+
+  try {
+    await importEngramCloudPrincipal(db, {
+      username,
+      password,
+      principalId,
+      token: issued.raw_token,
+      actorUserId: admin.id,
+      actorLabel: admin.username,
+    });
+  } catch {
+    // The only realistic failure here is users.username's UNIQUE
+    // constraint — the issued token above is not revoked (design.md D4's
+    // accepted trade-off: one harmless orphaned token on the Cloud side).
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/engram-cloud/import?error=duplicate' });
+      res.end();
+      return;
+    }
+    sendJson(res, 409, { error: 'duplicate_username' });
+    return;
+  }
+
+  if (isForm) {
+    res.writeHead(302, { Location: '/admin/users' });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
 }
 
 /**
@@ -1390,6 +1591,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'GET' && pathname === '/admin/console') {
     handleGetAdminConsole(req, res, db, url);
+    return true;
+  }
+
+  if (req.method === 'GET' && pathname === '/admin/engram-cloud/import') {
+    await handleGetEngramCloudImport(req, res, db, url);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/engram-cloud/import') {
+    await handlePostEngramCloudImport(req, res, db, config);
     return true;
   }
 

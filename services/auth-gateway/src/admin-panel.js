@@ -13,6 +13,7 @@ export const ADMIN_PANEL_ERRORS = Object.freeze({
   csrf: 'Your page expired. Reload and try again.',
   not_found: 'That user could not be found.',
   mismatch: 'Password and confirmation must match.',
+  unreachable: 'Engram Cloud is unreachable right now. Try again shortly.',
 });
 
 /**
@@ -31,6 +32,7 @@ function renderAdminNav(csrfToken) {
   <a href="/admin/users">Users</a>
   <a href="/admin/console?view=cloud">Engram Cloud dashboard</a>
   <a href="/admin/console?view=monitor">Monitor</a>
+  <a href="/admin/engram-cloud/import">Import from Engram Cloud</a>
   <form method="post" action="/admin/logout">
     <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
     <button type="submit">Log out</button>
@@ -151,6 +153,64 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
   </form>
 </main>`;
   return renderDocument({ title: 'Admin — Users', body });
+}
+
+/**
+ * One row of the import list — a Cloud principal with no local admin
+ * account yet, and its own create-account form (admin-identity-unification,
+ * `engram-cloud-principal-import` spec). `principalId`/`username`/`role`
+ * come from Engram Cloud's own API response, never user input at render
+ * time — still escaped (A12 precedent, same reasoning as every other
+ * server-sourced value rendered in this panel).
+ * @param {{ principal_id: string, username: string, role: string }} principal
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderImportRow(principal, csrfToken) {
+  return `<tr>
+    <td>${escapeHtml(principal.username)}</td>
+    <td>${escapeHtml(principal.role)}</td>
+    <td>
+      <form method="post" action="/admin/engram-cloud/import">
+        <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+        <input type="hidden" name="principalId" value="${escapeHtml(principal.principal_id)}">
+        <label>New local username <input type="text" name="username" required autocomplete="off"></label>
+        <label>Password <input type="password" name="password" required autocomplete="new-password"></label>
+        <label>Confirm password <input type="password" name="passwordConfirm" required autocomplete="new-password"></label>
+        <button type="submit">Import</button>
+      </form>
+    </td>
+  </tr>`;
+}
+
+/**
+ * GET /admin/engram-cloud/import — lists Engram Cloud principals that have
+ * no local admin account yet, each with its own import form.
+ * @param {{ principals: Array<{ principal_id: string, username: string, role: string }>, csrfToken: string, errorCode?: string | null }} options
+ * @returns {string}
+ */
+export function renderImportPage({ principals, csrfToken, errorCode }) {
+  const errorMessage =
+    errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
+      ? ADMIN_PANEL_ERRORS[errorCode]
+      : null;
+  const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
+  const rows = principals.map((p) => renderImportRow(p, csrfToken)).join('\n');
+  const body = `<main>
+  ${renderAdminNav(csrfToken)}
+  <h1>Import from Engram Cloud</h1>
+  <p class="note">Engram Cloud principals with no local account yet.</p>
+  ${errorMarkup}
+  <table>
+    <thead>
+      <tr><th>Cloud username</th><th>Cloud role</th><th></th></tr>
+    </thead>
+    <tbody>
+      ${rows}
+    </tbody>
+  </table>
+</main>`;
+  return renderDocument({ title: 'Admin — Import from Engram Cloud', body });
 }
 
 /**

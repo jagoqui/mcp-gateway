@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { hashPassword, hashToken } from './tokens.js';
 import { recordAudit } from './admin-audit.js';
+import { encrypt } from './crypto.js';
 
 const TOKEN_BYTES = 32;
 
@@ -57,6 +58,51 @@ export async function createManagedUser(db, opts) {
       outcome: 'success',
       targetUserId: id,
       detail: { username },
+    });
+    return { id, username };
+  });
+
+  return runTransaction();
+}
+
+/**
+ * Creates a local admin account for a Cloud principal that already exists
+ * (admin-identity-unification, the mirror image of createManagedUser: there
+ * a local account exists and a Cloud principal gets created for it, here a
+ * Cloud principal exists and a local account gets created for it). The
+ * caller (admin-app.js) has already issued `token` via engram-cloud-client's
+ * `issueToken` BEFORE calling this — this function's own job is purely the
+ * synchronous local write (D4): `is_admin = 1` user row + encrypted
+ * `engram_cloud_credentials` link + audit row, in one transaction. A
+ * duplicate `username` throws and rolls back all three; the already-issued
+ * Cloud token itself is not revoked by that rollback (accepted trade-off,
+ * see design.md D4 — the network call had to happen before this sync
+ * transaction could run).
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ username: string, password: string, principalId: string, token: string, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {Promise<{ id: number, username: string }>}
+ */
+export async function importEngramCloudPrincipal(db, opts) {
+  const { username, password, principalId, token, actorUserId, actorLabel } = opts;
+  const passwordHash = await hashPassword(password);
+  const ciphertext = encrypt(token);
+
+  const runTransaction = db.transaction(() => {
+    const info = db
+      .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)')
+      .run(username, passwordHash);
+    const id = Number(info.lastInsertRowid);
+    db.prepare(
+      `INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+    ).run(id, principalId, ciphertext);
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'user.create',
+      outcome: 'success',
+      targetUserId: id,
+      detail: { username, principalId, source: 'engram_cloud_import' },
     });
     return { id, username };
   });

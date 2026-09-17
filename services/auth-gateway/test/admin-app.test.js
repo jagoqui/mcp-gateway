@@ -2046,3 +2046,191 @@ test('GET /admin/console carries a frame-src CSP directive (unlike every other a
   const res = await fetch(`${baseUrl}/admin/console`, { headers: { Cookie: cookie } });
   assert.ok(res.headers.get('content-security-policy').includes("frame-src 'self'"));
 });
+
+// admin-identity-unification, Unit 1 — POST /admin/login also provisions a
+// Cloud link if one is missing (design.md D1/D2), reusing the same
+// ensureEngramCloudLink logic the SSO route already has.
+
+async function createRealAdmin(username) {
+  const { hashPassword } = await import('../src/tokens.js');
+  const password = 'correct-horse-battery-staple';
+  const passwordHash = await hashPassword(password);
+  const info = db
+    .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)')
+    .run(username, passwordHash);
+  return { userId: Number(info.lastInsertRowid), username, password };
+}
+
+test('POST /admin/login provisions a Cloud link for a first-time admin, without visiting the SSO route', async () => {
+  const { userId, username, password } = await createRealAdmin('login-provision-first-time');
+  engramCloudResponsesByRoute['POST /admin/users'] = {
+    status: 201,
+    body: { principal_id: 'p-login-1', username, role: 'admin' },
+  };
+  engramCloudResponsesByRoute['POST /admin/users/p-login-1/tokens'] = {
+    status: 201,
+    body: { raw_token: 'login-issued-token', token: { id: 't1', principal_id: 'p-login-1' } },
+  };
+
+  const res = await postAdminLogin({ username, password });
+  assert.equal(res.status, 302);
+
+  const row = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(userId)
+  );
+  assert.equal(row.principal_id, 'p-login-1');
+});
+
+test('POST /admin/login for an already-linked admin makes no new Cloud calls', async () => {
+  const { userId, username, password } = await createRealAdmin('login-provision-already-linked');
+  const { encrypt } = await import('../src/crypto.js');
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(userId, 'p-existing', encrypt('existing-token'));
+
+  const res = await postAdminLogin({ username, password });
+  assert.equal(res.status, 302);
+  assert.equal(engramCloudRequestLog.length, 0);
+});
+
+test('POST /admin/login succeeds normally even when Engram Cloud is unreachable, and creates no link', async () => {
+  const { userId, username, password } = await createRealAdmin('login-provision-cloud-down');
+  await engramCloudStub.close();
+
+  const res = await postAdminLogin({ username, password });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users');
+
+  const row = db
+    .prepare('SELECT 1 FROM engram_cloud_credentials WHERE user_id = ?')
+    .get(userId);
+  assert.equal(row, undefined);
+  // afterEach's own engramCloudStub.close() on an already-closed server is a
+  // harmless no-op (Node's http.Server.close() tolerates a double-close).
+});
+
+// admin-identity-unification, Unit 2 — GET/POST /admin/engram-cloud/import.
+
+test('GET /admin/engram-cloud/import with no admin cookie returns 401, stub never hit', async () => {
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
+    headers: { Accept: 'application/json' },
+  });
+  assert.equal(res.status, 401);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('GET /admin/engram-cloud/import lists a Cloud principal with no local link and excludes one that has one', async () => {
+  const { cookie, userId } = loginAsAdmin();
+  const { encrypt } = await import('../src/crypto.js');
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(userId, 'p-already-linked', encrypt('linked-token'));
+  engramCloudResponsesByRoute['GET /admin/users'] = {
+    status: 200,
+    body: [
+      { principal_id: 'p-already-linked', username: 'previously-linked-user', role: 'member' },
+      { principal_id: 'p-unlinked', username: 'brand-new-unlinked-user', role: 'member' },
+    ],
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('brand-new-unlinked-user'));
+  assert.ok(!body.includes('previously-linked-user'));
+});
+
+test('POST /admin/engram-cloud/import creates a working local account linked to the chosen principal', async () => {
+  const { cookie, userId } = loginAsAdmin('import-operator');
+  const adminSecret = ADMIN_SECRET;
+  const csrf = issueAdminCsrfToken(userId, adminSecret);
+  engramCloudResponsesByRoute['POST /admin/users/p-to-import/tokens'] = {
+    status: 201,
+    body: { raw_token: 'import-issued-token', token: { id: 't1', principal_id: 'p-to-import' } },
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      principalId: 'p-to-import',
+      username: 'imported-local-account',
+      password: 'a-strong-password',
+      passwordConfirm: 'a-strong-password',
+      csrf,
+    }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+
+  const newUser = /** @type {any} */ (
+    db.prepare('SELECT id FROM users WHERE username = ?').get('imported-local-account')
+  );
+  assert.ok(newUser);
+  const link = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(newUser.id)
+  );
+  assert.equal(link.principal_id, 'p-to-import');
+});
+
+test('POST /admin/engram-cloud/import with mismatched password confirmation redirects with error=mismatch, creates nothing', async () => {
+  const { cookie, userId } = loginAsAdmin('import-mismatch-operator');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      principalId: 'p-mismatch',
+      username: 'mismatch-account',
+      password: 'a-strong-password',
+      passwordConfirm: 'does-not-match',
+      csrf,
+    }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/engram-cloud/import?error=mismatch');
+  assert.equal(engramCloudRequestLog.length, 0);
+  const row = db.prepare('SELECT 1 FROM users WHERE username = ?').get('mismatch-account');
+  assert.equal(row, undefined);
+});
+
+test('POST /admin/engram-cloud/import with a mismatched Origin returns 403, stub never hit', async () => {
+  const { cookie, userId } = loginAsAdmin('import-origin-operator');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: 'https://evil.example.com',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      principalId: 'p-origin',
+      username: 'origin-account',
+      password: 'a-strong-password',
+      passwordConfirm: 'a-strong-password',
+      csrf,
+    }),
+  });
+  assert.equal(res.status, 403);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('POST /admin/engram-cloud/import with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 401);
+});

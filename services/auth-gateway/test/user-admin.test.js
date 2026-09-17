@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { openDb } from '../src/db.js';
 import { verifyPassword } from '../src/tokens.js';
+import { decrypt } from '../src/crypto.js';
 import {
   createUser,
   createManagedUser,
+  importEngramCloudPrincipal,
   issueToken,
   issueManagedToken,
   getManagedUser,
@@ -18,6 +21,11 @@ import {
   revokeManagedToken,
   regenerateToken,
 } from '../src/user-admin.js';
+
+// admin-identity-unification's importEngramCloudPrincipal needs a real
+// encryption key — set once, module-wide (no other test in this file uses
+// crypto.js, so no existing hook to piggyback on).
+process.env.ATLASSIAN_ENC_KEY = crypto.randomBytes(32).toString('base64');
 
 /** @returns {any[]} */
 function allAuditRows(db) {
@@ -706,6 +714,83 @@ test('regenerateToken rolls back the whole transaction when the audit insert fai
   assert.equal(total.count, 1, 'no new token must exist after rollback');
   const auditRows = /** @type {any[]} */ (
     db.prepare("SELECT * FROM admin_audit_log WHERE action = 'token.regenerate'").all()
+  );
+  assert.equal(auditRows.length, 0);
+  db.close();
+});
+
+// admin-identity-unification, Unit 2 — importEngramCloudPrincipal: the
+// mirror image of createManagedUser, for a Cloud principal that already
+// exists and needs a NEW local account created for it (D4).
+
+test('importEngramCloudPrincipal creates an is_admin=1 local user, encrypted-linked to the given principal, in one transaction', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, { username: 'root-admin', password: 'irrelevant', isAdmin: true });
+  const user = await importEngramCloudPrincipal(db, {
+    username: 'imported-bob',
+    password: 'a-strong-password',
+    principalId: 'p-import-1',
+    token: 'issued-at-import-token',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+  assert.equal(user.username, 'imported-bob');
+
+  const userRow = /** @type {any} */ (
+    db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
+  );
+  assert.equal(userRow.is_admin, 1);
+  assert.equal(await verifyPassword('a-strong-password', userRow.password_hash), true);
+
+  const linkRow = /** @type {any} */ (
+    db.prepare('SELECT * FROM engram_cloud_credentials WHERE user_id = ?').get(user.id)
+  );
+  assert.equal(linkRow.principal_id, 'p-import-1');
+  assert.equal(decrypt(linkRow.ciphertext), 'issued-at-import-token');
+  db.close();
+});
+
+test('importEngramCloudPrincipal writes exactly one user.create audit row', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, { username: 'root-admin', password: 'irrelevant', isAdmin: true });
+  const user = await importEngramCloudPrincipal(db, {
+    username: 'imported-carol',
+    password: 'a-strong-password',
+    principalId: 'p-import-2',
+    token: 'another-token',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'user.create' AND target_user_id = ?").all(user.id)
+  );
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].actor_label, 'root-admin');
+  db.close();
+});
+
+test('importEngramCloudPrincipal rolls back entirely on a duplicate local username — no user row, no link row, no audit row', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, { username: 'root-admin', password: 'irrelevant', isAdmin: true });
+  await createUser(db, { username: 'dave', password: 'already-taken' });
+
+  await assert.rejects(() =>
+    importEngramCloudPrincipal(db, {
+      username: 'dave',
+      password: 'a-strong-password',
+      principalId: 'p-import-3',
+      token: 'yet-another-token',
+      actorUserId: admin.id,
+      actorLabel: 'root-admin',
+    }),
+  );
+
+  const linkRows = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS count FROM engram_cloud_credentials WHERE principal_id = ?').get('p-import-3')
+  );
+  assert.equal(linkRows.count, 0);
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'user.create'").all()
   );
   assert.equal(auditRows.length, 0);
   db.close();
