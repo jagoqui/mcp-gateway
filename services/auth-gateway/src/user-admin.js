@@ -79,18 +79,18 @@ export async function createManagedUser(db, opts) {
  * see design.md D4 — the network call had to happen before this sync
  * transaction could run).
  * @param {import('better-sqlite3').Database} db
- * @param {{ username: string, password: string, principalId: string, token: string, actorUserId: number | null, actorLabel: string }} opts
+ * @param {{ username: string, password: string, principalId: string, token: string, role?: string, actorUserId: number | null, actorLabel: string }} opts
  * @returns {Promise<{ id: number, username: string }>}
  */
 export async function importEngramCloudPrincipal(db, opts) {
-  const { username, password, principalId, token, actorUserId, actorLabel } = opts;
+  const { username, password, principalId, token, role = 'admin', actorUserId, actorLabel } = opts;
   const passwordHash = await hashPassword(password);
   const ciphertext = encrypt(token);
 
   const runTransaction = db.transaction(() => {
     const info = db
-      .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)')
-      .run(username, passwordHash);
+      .prepare('INSERT INTO users (username, password_hash, is_admin, role) VALUES (?, ?, 1, ?)')
+      .run(username, passwordHash, role);
     const id = Number(info.lastInsertRowid);
     db.prepare(
       `INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at)

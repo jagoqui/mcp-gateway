@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash TEXT NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
+  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'member')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   disabled_at TEXT
 );

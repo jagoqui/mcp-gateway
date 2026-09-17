@@ -118,6 +118,28 @@ function sendJson(res, status, body) {
 }
 
 /**
+ * Rejects a non-admin (member) session from an admin-only route
+ * (admin-identity-unification Unit 3): a member's ONLY reachable surface
+ * is `GET /admin/engram-cloud/sso` and the console's `view=cloud` tab —
+ * Engram Cloud's own dashboard already enforces whatever that role
+ * can/can't do internally, so no fine-grained permission system is built
+ * here. `admin.is_admin === 1` is already guaranteed by `authenticateAdmin`
+ * for anyone reaching this check (it means "can reach the admin-panel
+ * login gate at all") — `role` is the finer admin/member distinction
+ * WITHIN that.
+ * @param {import('node:http').ServerResponse} res
+ * @param {{ role: string }} admin
+ * @returns {boolean} true if rejected — caller MUST return immediately
+ */
+function rejectNonAdminRole(res, admin) {
+  if (admin.role !== 'admin') {
+    sendJson(res, 403, { error: 'admin_role_required' });
+    return true;
+  }
+  return false;
+}
+
+/**
  * GET /admin/verify — the Caddy forward_auth target for the admin.{$DOMAIN}
  * vhost (design.md Caddyfile section). authenticateAdmin is cookie-only
  * (A8), so a Bearer token never grants admin. Dual-mode failure response
@@ -460,6 +482,9 @@ function handleGetAdminUsers(req, res, db, url) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
+  if (rejectNonAdminRole(res, admin)) {
+    return;
+  }
 
   const users = listManagedUsers(db);
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
@@ -486,6 +511,9 @@ async function handlePostAdminUsers(req, res, db, config) {
   const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
   if (!admin) {
     sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+  if (rejectNonAdminRole(res, admin)) {
     return;
   }
 
@@ -599,6 +627,9 @@ async function handlePostAdminUserDisabled(req, res, db, config, disabled) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
+  if (rejectNonAdminRole(res, admin)) {
+    return;
+  }
 
   // 2. Origin check — strict (D7), same reasoning as every other admin write.
   const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
@@ -705,6 +736,9 @@ function handleGetAdminTokens(req, res, db, url) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
+  if (rejectNonAdminRole(res, admin)) {
+    return;
+  }
 
   const userId = Number(url.searchParams.get('userId'));
   if (!Number.isInteger(userId) || userId <= 0) {
@@ -757,6 +791,9 @@ async function handlePostAdminTokensIssue(req, res, db, config) {
   const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
   if (!admin) {
     sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+  if (rejectNonAdminRole(res, admin)) {
     return;
   }
 
@@ -858,6 +895,9 @@ async function beginTokenWrite(req, res, db, config) {
   const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
   if (!admin) {
     sendJson(res, 401, { error: 'unauthenticated' });
+    return null;
+  }
+  if (rejectNonAdminRole(res, admin)) {
     return null;
   }
 
@@ -1060,6 +1100,9 @@ async function beginEngramCloudWrite(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return null;
   }
+  if (rejectNonAdminRole(res, admin)) {
+    return null;
+  }
 
   const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
     isAcceptableOrigin(
@@ -1127,6 +1170,9 @@ async function handleGetEngramCloudUsers(req, res, db) {
   const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
   if (!admin) {
     sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+  if (rejectNonAdminRole(res, admin)) {
     return;
   }
 
@@ -1236,9 +1282,15 @@ function handleGetAdminConsole(req, res, db, url) {
     return;
   }
 
+  // A member has nowhere else useful to land (Unit 3) — force the cloud
+  // view regardless of the query param, rather than 403ing a plain
+  // navigational GET the nav itself would never even link to for them.
+  const requestedView = url.searchParams.get('view');
+  const view = admin.role === 'admin' ? requestedView : 'cloud';
+
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   res.writeHead(200, CONSOLE_PAGE_HEADERS);
-  res.end(renderConsolePage({ view: url.searchParams.get('view'), csrfToken }));
+  res.end(renderConsolePage({ view, csrfToken, role: admin.role }));
 }
 
 /**
@@ -1290,7 +1342,7 @@ async function ensureEngramCloudLink(db, admin) {
   if (existing) {
     return existing;
   }
-  const created = await createEngramCloudUser({ username: admin.username, role: 'admin' });
+  const created = await createEngramCloudUser({ username: admin.username, role: admin.role });
   const issued = await issueEngramCloudToken({
     principalId: created.principal_id,
     name: 'console-sso',
@@ -1358,6 +1410,9 @@ async function handleGetEngramCloudImport(req, res, db, url) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
+  if (rejectNonAdminRole(res, admin)) {
+    return;
+  }
 
   /** @type {any[]} */
   let cloudUsers;
@@ -1404,6 +1459,9 @@ async function handlePostEngramCloudImport(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
+  if (rejectNonAdminRole(res, admin)) {
+    return;
+  }
 
   // 2. Origin check — strict (D7), same reasoning as every other admin write.
   const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
@@ -1442,14 +1500,19 @@ async function handlePostEngramCloudImport(req, res, db, config) {
 
   // 5. Validate, issue a token for the chosen principal, then create the
   // local account + link atomically (importEngramCloudPrincipal, D4/D8).
-  const { principalId, username, password, passwordConfirm } = data ?? {};
+  // `role` is a hidden field rendered server-side from the already-fetched
+  // unlinked-principal list (Unit 3) — same trust level as `principalId`
+  // itself: the submitter is already an authenticated admin, not a new
+  // trust boundary. Still allow-listed (A13), never passed through raw.
+  const { principalId, username, password, passwordConfirm, role } = data ?? {};
   if (
     typeof principalId !== 'string' ||
     !principalId ||
     typeof username !== 'string' ||
     !username ||
     typeof password !== 'string' ||
-    !password
+    !password ||
+    (role !== 'admin' && role !== 'member')
   ) {
     if (isForm) {
       res.writeHead(302, { Location: '/admin/engram-cloud/import?error=invalid' });
@@ -1486,6 +1549,7 @@ async function handlePostEngramCloudImport(req, res, db, config) {
       password,
       principalId,
       token: issued.raw_token,
+      role,
       actorUserId: admin.id,
       actorLabel: admin.username,
     });

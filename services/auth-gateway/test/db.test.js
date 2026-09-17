@@ -131,6 +131,29 @@ test('engram_cloud_credentials.user_id is unique per user (one Cloud identity pe
   db.close();
 });
 
+test('users has a role column defaulting to admin, distinct from is_admin', () => {
+  const db = openDb(':memory:');
+  db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('frank', 'hash');
+  const row = /** @type {any} */ (
+    db.prepare('SELECT role FROM users WHERE username = ?').get('frank')
+  );
+  assert.equal(row.role, 'admin');
+  db.close();
+});
+
+test('users.role CHECK constraint accepts admin and member, rejects anything else', () => {
+  const db = openDb(':memory:');
+  db.prepare("INSERT INTO users (username, password_hash, role) VALUES ('grace', 'hash', 'member')").run();
+  const row = /** @type {any} */ (
+    db.prepare('SELECT role FROM users WHERE username = ?').get('grace')
+  );
+  assert.equal(row.role, 'member');
+  assert.throws(() => {
+    db.prepare("INSERT INTO users (username, password_hash, role) VALUES ('heidi', 'hash', 'bogus')").run();
+  }, /CHECK constraint failed/);
+  db.close();
+});
+
 test('deleting a user cascades to delete their engram_cloud_credentials row', () => {
   const db = openDb(':memory:');
   db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('erin', 'hash');

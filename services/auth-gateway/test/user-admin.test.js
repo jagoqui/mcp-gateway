@@ -795,3 +795,36 @@ test('importEngramCloudPrincipal rolls back entirely on a duplicate local userna
   assert.equal(auditRows.length, 0);
   db.close();
 });
+
+test('importEngramCloudPrincipal stores the given role (from the Cloud principal itself), not a hardcoded one', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, { username: 'root-admin', password: 'irrelevant', isAdmin: true });
+  const user = await importEngramCloudPrincipal(db, {
+    username: 'imported-member',
+    password: 'a-strong-password',
+    principalId: 'p-import-member',
+    token: 'a-token',
+    role: 'member',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+  const userRow = /** @type {any} */ (db.prepare('SELECT role FROM users WHERE id = ?').get(user.id));
+  assert.equal(userRow.role, 'member');
+  db.close();
+});
+
+test('importEngramCloudPrincipal defaults to role=admin when none is given', async () => {
+  const db = openDb(':memory:');
+  const admin = await createUser(db, { username: 'root-admin', password: 'irrelevant', isAdmin: true });
+  const user = await importEngramCloudPrincipal(db, {
+    username: 'imported-default-role',
+    password: 'a-strong-password',
+    principalId: 'p-import-default',
+    token: 'a-token',
+    actorUserId: admin.id,
+    actorLabel: 'root-admin',
+  });
+  const userRow = /** @type {any} */ (db.prepare('SELECT role FROM users WHERE id = ?').get(user.id));
+  assert.equal(userRow.role, 'admin');
+  db.close();
+});

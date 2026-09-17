@@ -40,15 +40,15 @@ afterEach(async () => {
 });
 
 /**
- * @param {{ username?: string, isAdmin?: boolean, disabled?: boolean }} [opts]
+ * @param {{ username?: string, isAdmin?: boolean, disabled?: boolean, role?: string }} [opts]
  */
 function insertUser(opts = {}) {
-  const { username = 'root-admin', isAdmin = true, disabled = false } = opts;
+  const { username = 'root-admin', isAdmin = true, disabled = false, role = 'admin' } = opts;
   const info = db
     .prepare(
-      'INSERT INTO users (username, password_hash, is_admin, disabled_at) VALUES (?, ?, ?, ?)',
+      'INSERT INTO users (username, password_hash, is_admin, disabled_at, role) VALUES (?, ?, ?, ?, ?)',
     )
-    .run(username, 'bcrypt-placeholder', isAdmin ? 1 : 0, disabled ? '2024-01-01T00:00:00Z' : null);
+    .run(username, 'bcrypt-placeholder', isAdmin ? 1 : 0, disabled ? '2024-01-01T00:00:00Z' : null, role);
   return Number(info.lastInsertRowid);
 }
 
@@ -597,6 +597,13 @@ test('a regular (non-admin) session cookie never authenticates POST /admin/logou
 /** @returns {{ userId: number, cookie: string, adminSecret: string }} */
 function loginAsAdmin(username = 'unit8-admin') {
   const userId = insertUser({ username });
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  return { userId, cookie: `__Host-admin_session=${token}` };
+}
+
+/** @returns {{ userId: number, cookie: string }} */
+function loginAsMember(username = 'unit-member') {
+  const userId = insertUser({ username, role: 'member' });
   const token = createAdminSessionToken(userId, ADMIN_SECRET);
   return { userId, cookie: `__Host-admin_session=${token}` };
 }
@@ -2051,13 +2058,13 @@ test('GET /admin/console carries a frame-src CSP directive (unlike every other a
 // Cloud link if one is missing (design.md D1/D2), reusing the same
 // ensureEngramCloudLink logic the SSO route already has.
 
-async function createRealAdmin(username) {
+async function createRealAdmin(username, role = 'admin') {
   const { hashPassword } = await import('../src/tokens.js');
   const password = 'correct-horse-battery-staple';
   const passwordHash = await hashPassword(password);
   const info = db
-    .prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)')
-    .run(username, passwordHash);
+    .prepare('INSERT INTO users (username, password_hash, is_admin, role) VALUES (?, ?, 1, ?)')
+    .run(username, passwordHash, role);
   return { userId: Number(info.lastInsertRowid), username, password };
 }
 
@@ -2161,6 +2168,7 @@ test('POST /admin/engram-cloud/import creates a working local account linked to 
       username: 'imported-local-account',
       password: 'a-strong-password',
       passwordConfirm: 'a-strong-password',
+      role: 'admin',
       csrf,
     }),
     redirect: 'manual',
@@ -2193,6 +2201,7 @@ test('POST /admin/engram-cloud/import with mismatched password confirmation redi
       username: 'mismatch-account',
       password: 'a-strong-password',
       passwordConfirm: 'does-not-match',
+      role: 'admin',
       csrf,
     }),
     redirect: 'manual',
@@ -2233,4 +2242,74 @@ test('POST /admin/engram-cloud/import with no admin cookie returns 401', async (
     body: JSON.stringify({}),
   });
   assert.equal(res.status, 401);
+});
+
+// admin-identity-unification, Unit 3 — member role: only the Engram Cloud
+// SSO surface is reachable; everything else stays admin-only.
+
+test('POST /admin/login succeeds for a role=member account, same as admin', async () => {
+  const { username, password } = await createRealAdmin('login-member', 'member');
+  const res = await postAdminLogin({ username, password });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/users');
+});
+
+test('a member session is rejected by GET /admin/users', async () => {
+  const { cookie } = loginAsMember();
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    headers: { Cookie: cookie, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 403);
+});
+
+test('a member session is rejected by GET /admin/engram-cloud/import', async () => {
+  const { cookie } = loginAsMember();
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
+    headers: { Cookie: cookie, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('a member session is rejected by GET /admin/engram-cloud/users (the Phase 3 admin proxy)', async () => {
+  const { cookie } = loginAsMember();
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/users`, {
+    headers: { Cookie: cookie, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('a member session on GET /admin/console?view=monitor is redirected to the cloud view, not admitted or errored', async () => {
+  const { cookie } = loginAsMember();
+  const res = await fetch(`${baseUrl}/admin/console?view=monitor`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('<iframe src="/admin/engram-cloud/sso"'));
+});
+
+test('a member session is accepted by GET /admin/engram-cloud/sso, same as admin', async () => {
+  const { cookie, userId } = loginAsMember();
+  engramCloudResponsesByRoute['POST /admin/users'] = {
+    status: 201,
+    body: { principal_id: 'p-member-1', username: 'unit-member', role: 'member' },
+  };
+  engramCloudResponsesByRoute['POST /admin/users/p-member-1/tokens'] = {
+    status: 201,
+    body: { raw_token: 'member-token', token: { id: 't1', principal_id: 'p-member-1' } },
+  };
+  engramCloudResponsesByRoute['POST /dashboard/login'] = {
+    status: 303,
+    headers: { 'Set-Cookie': 'engram_dashboard_token=xyz; Path=/dashboard; HttpOnly; SameSite=Lax' },
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, { headers: { Cookie: cookie }, redirect: 'manual' });
+  assert.equal(res.status, 302);
+
+  const createCall = engramCloudRequestLog.find((r) => r.url === '/admin/users');
+  assert.deepEqual(JSON.parse(createCall.body), { username: 'unit-member', role: 'member' });
+  const link = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(userId)
+  );
+  assert.equal(link.principal_id, 'p-member-1');
 });

@@ -39,6 +39,66 @@ Full suite after Unit 1: 363/363 `node --test` passing (up from 360).
 
 Full suite after Unit 2: 372/372 `node --test` passing (up from 363), lint clean.
 
+## Phase 2b: Member Role Sync (Unit 3, new, 2026-09-17)
+
+User-requested addition after Units 1-2 shipped: local admin-panel role
+must be kept in sync with Engram Cloud's own `admin`/`member` role, in
+both directions. Resolved with the user: a `member` gets ONLY the
+Engram Cloud SSO surface (`GET /admin/engram-cloud/sso` and the
+`view=cloud` console tab) — Cloud's own dashboard already enforces
+whatever that role can/can't do internally (confirmed earlier via
+deepwiki: `dashboardPrincipalSessionClaims.Role` travels in the session
+this panel already relays). Every other route (Users, Import, Monitor,
+the Cloud admin-proxy routes) stays admin-only — no new fine-grained
+permission system is built here.
+
+- [x] 3.1 RED `test/db.test.js`: 2 new tests — `role` column defaults to
+  `'admin'`, distinct from `is_admin`; CHECK constraint accepts
+  `admin`/`member`, rejects anything else.
+- [x] 3.2 GREEN: `src/db.js` — `role TEXT NOT NULL DEFAULT 'admin' CHECK
+  (role IN ('admin', 'member'))` added to `users`. `is_admin` keeps its
+  existing meaning ("can reach the admin-panel login gate at all", true
+  for both roles) unchanged — `role` is the finer distinction WITHIN
+  that, a deliberately separate column rather than overloading
+  `is_admin`'s existing semantics.
+- [x] 3.3 RED `test/admin-app.test.js`: `POST /admin/login` succeeds for
+  a `role = 'member'` account — confirmed the existing `is_admin !== 1`
+  gate needed no change (trivially true pre-change too, same pattern as
+  Unit 1's vacuous-until-meaningful tests).
+- [x] 3.4/3.5 RED/GREEN: a shared `rejectNonAdminRole(res, admin)` (D11)
+  added right after every admin-only handler's existing auth check —
+  `handleGetAdminUsers`, `handlePostAdminUsers`,
+  `handlePostAdminUserDisabled`, `handleGetAdminTokens`,
+  `handlePostAdminTokensIssue`, `beginTokenWrite` (covers Revoke +
+  Regenerate), `handleGetEngramCloudUsers`, `beginEngramCloudWrite`
+  (covers the Phase 3 Users/Grant/Token proxy writes),
+  `handleGetEngramCloudImport`, `handlePostEngramCloudImport` — 13 call
+  sites via 10 edits (3 shared helpers each cover 2+ routes).
+  `handleGetAdminConsole` forces `view = 'cloud'` for a member instead of
+  rejecting — a plain navigational GET the nav itself never even links
+  to for them. 5 new tests: member login succeeds; member rejected (403)
+  by Users, Import, and the Cloud admin-proxy; member on
+  `?view=monitor` gets redirected to the cloud iframe, not an error;
+  member accepted by the SSO route, provisioning a Cloud principal with
+  `role: 'member'` (not hardcoded `'admin'`).
+- [x] 3.6/3.7 RED/GREEN: `importEngramCloudPrincipal` gained an optional
+  `role` param (default `'admin'`, preserving Unit 2's existing tests
+  unchanged) stored on the new `users` row. `ensureEngramCloudLink`
+  passes `admin.role` to `createEngramCloudUser` instead of the old
+  hardcoded `'admin'`. `handlePostEngramCloudImport`'s validation now
+  requires `role` to be exactly `'admin'` or `'member'` (A13 allow-list);
+  `renderImportRow` renders it as a hidden field, normalizing any
+  Cloud role value other than the exact string `'admin'` to `'member'`
+  (never a silent admin grant from an unrecognized value). 2 new
+  `user-admin.test.js` tests; updated 2 pre-existing Unit 2 import tests
+  to submit the now-required `role` field.
+- [x] 3.8 Nav: `renderConsolePage` (the only page a member reaches) now
+  takes a `role` param and hides the Users link and Monitor tab for a
+  member — enforcement is still server-side in the handlers above, this
+  is UI-only. `handleGetAdminConsole` passes `admin.role` through.
+
+Full suite after Unit 3: 382/382 `node --test` passing (up from 372), lint clean.
+
 ## Phase 3: Manual E2E (both units)
 
 - [ ] 3.1 On this VPS: create a brand-new local admin (no prior Cloud link), log in, confirm `engram_cloud_credentials` gets a row without visiting the Cloud nav link.

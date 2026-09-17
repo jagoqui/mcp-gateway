@@ -51,22 +51,31 @@ function renderAdminNav(csrfToken) {
  * `cloud` view's iframe src IS the SSO route (`/admin/engram-cloud/sso`),
  * so opening that tab performs the per-admin login and lands the iframe on
  * `/dashboard` in one step — no separate "log in first" click.
- * @param {{ view?: string | null, csrfToken: string }} options
+ * @param {{ view?: string | null, csrfToken: string, role?: string }} options
  * @returns {string}
  */
-export function renderConsolePage({ view, csrfToken }) {
-  const activeView = view === 'cloud' ? 'cloud' : 'monitor';
+export function renderConsolePage({ view, csrfToken, role = 'admin' }) {
+  const isAdmin = role === 'admin';
+  // Unit 3: a member only ever reaches this page for the cloud view — the
+  // handler already forces it server-side (handleGetAdminConsole), so the
+  // Monitor tab and Users link would only ever 403 if a member clicked
+  // them. Hidden here for UX, not as the actual enforcement boundary.
+  const activeView = isAdmin && view === 'cloud' ? 'cloud' : isAdmin ? 'monitor' : 'cloud';
   const iframeSrc = activeView === 'cloud' ? '/admin/engram-cloud/sso' : '/monitor';
+  const usersLink = isAdmin ? '<a href="/admin/users">Users</a>' : '';
+  const monitorTab = isAdmin
+    ? `<a href="/admin/console?view=monitor"${activeView === 'monitor' ? ' class="active"' : ''}>Monitor</a>`
+    : '';
   const body = `<div class="shell">
   <header class="shell-header">
-    <a href="/admin/users">Users</a>
+    ${usersLink}
     <form method="post" action="/admin/logout">
       <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
       <button type="submit">Log out</button>
     </form>
   </header>
   <aside class="shell-sidebar">
-    <a href="/admin/console?view=monitor"${activeView === 'monitor' ? ' class="active"' : ''}>Monitor</a>
+    ${monitorTab}
     <a href="/admin/console?view=cloud"${activeView === 'cloud' ? ' class="active"' : ''}>Engram Cloud</a>
   </aside>
   <main class="shell-main">
@@ -167,6 +176,10 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
  * @returns {string}
  */
 function renderImportRow(principal, csrfToken) {
+  // Never trust an unrecognized Cloud role value into a silent local
+  // admin grant (Unit 3) — anything but the exact string 'admin' becomes
+  // 'member', the least-privileged option.
+  const localRole = principal.role === 'admin' ? 'admin' : 'member';
   return `<tr>
     <td>${escapeHtml(principal.username)}</td>
     <td>${escapeHtml(principal.role)}</td>
@@ -174,6 +187,7 @@ function renderImportRow(principal, csrfToken) {
       <form method="post" action="/admin/engram-cloud/import">
         <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
         <input type="hidden" name="principalId" value="${escapeHtml(principal.principal_id)}">
+        <input type="hidden" name="role" value="${escapeHtml(localRole)}">
         <label>New local username <input type="text" name="username" required autocomplete="off"></label>
         <label>Password <input type="password" name="password" required autocomplete="new-password"></label>
         <label>Confirm password <input type="password" name="passwordConfirm" required autocomplete="new-password"></label>
