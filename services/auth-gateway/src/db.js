@@ -56,13 +56,45 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_target_user ON admin_audit_log(target
 `;
 
 /**
- * Applies the auth-gateway schema (idempotent, CREATE ... IF NOT EXISTS) to
- * an already-open database handle.
+ * `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already
+ * exists on disk — it does NOT retroactively add a new column to it. Any
+ * column added to `users` (or another pre-existing table) after this
+ * codebase's first deployment needs an explicit migration here, or every
+ * database created before that column shipped silently lacks it forever
+ * (found live, 2026-09-17: every pre-existing admin got 403
+ * admin_role_required, because their real on-disk `users` table never
+ * gained `role` — `role` was reachable and correct only in fresh/test
+ * databases, where `CREATE TABLE` actually runs for the first time).
+ * @param {import('better-sqlite3').Database} db
+ * @returns {void}
+ */
+function migrateAddUsersRoleColumn(db) {
+  const columns = /** @type {{ name: string }[]} */ (db.prepare('PRAGMA table_info(users)').all());
+  const hasRole = columns.some((column) => column.name === 'role');
+  if (hasRole) {
+    return;
+  }
+  // Existing rows backfill to 'admin' (SQLite's ADD COLUMN default), not
+  // 'member' — every account that could already log in here was, by this
+  // codebase's own prior definition, an admin; role is a NEW distinction
+  // introduced alongside this migration, never a downgrade for who was
+  // already trusted with full access.
+  db.exec(
+    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'member'))",
+  );
+}
+
+/**
+ * Applies the auth-gateway schema (idempotent, CREATE ... IF NOT EXISTS)
+ * to an already-open database handle, then runs any migrations a fresh
+ * `CREATE TABLE IF NOT EXISTS` cannot express against a pre-existing
+ * table.
  * @param {import('better-sqlite3').Database} db
  * @returns {void}
  */
 export function applySchema(db) {
   db.exec(SCHEMA);
+  migrateAddUsersRoleColumn(db);
 }
 
 /**

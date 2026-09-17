@@ -4,7 +4,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openDb } from '../src/db.js';
+import Database from 'better-sqlite3';
+import { openDb, applySchema } from '../src/db.js';
 
 test('openDb creates the users, tokens, atlassian_credentials, engram_cloud_credentials, and admin_audit_log tables', () => {
   const db = openDb(':memory:');
@@ -105,6 +106,42 @@ test('atlassian_credentials.user_id is unique per user (one credential row per p
       "INSERT INTO atlassian_credentials (user_id, scheme, ciphertext, updated_at) VALUES (1, 'token', 'cipher-b', datetime('now'))",
     ).run();
   });
+  db.close();
+});
+
+test('applySchema migrates a pre-existing users table (created before the role column existed) by adding role, backfilling existing rows to admin', () => {
+  // Simulates a real production database: CREATE TABLE IF NOT EXISTS is a
+  // no-op against a table that already exists (it does NOT retroactively
+  // add new columns) — this is exactly the bug found live, 2026-09-17:
+  // every pre-existing admin got 403 admin_role_required after this
+  // column shipped, because their actual on-disk `users` table never
+  // gained it.
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT
+    );
+  `);
+  db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)').run(
+    'pre-existing-admin',
+    'hash',
+  );
+
+  applySchema(db);
+
+  const columns = /** @type {{ name: string }[]} */ (db.prepare('PRAGMA table_info(users)').all()).map(
+    (c) => c.name,
+  );
+  assert.ok(columns.includes('role'));
+  const row = /** @type {any} */ (
+    db.prepare('SELECT role FROM users WHERE username = ?').get('pre-existing-admin')
+  );
+  assert.equal(row.role, 'admin');
   db.close();
 });
 
