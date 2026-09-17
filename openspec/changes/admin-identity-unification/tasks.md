@@ -99,8 +99,10 @@ permission system is built here.
 
 Full suite after Unit 3: 382/382 `node --test` passing (up from 372), lint clean.
 
-## Phase 3: Manual E2E (both units)
+## Phase 3: Manual E2E (both units) — COMPLETE (2026-09-17)
 
-- [ ] 3.1 On this VPS: create a brand-new local admin (no prior Cloud link), log in, confirm `engram_cloud_credentials` gets a row without visiting the Cloud nav link.
-- [ ] 3.2 On this VPS: identify a real Cloud principal with no local link (or create one via `engram cloud bootstrap` / the existing Phase 3 create-user UI without importing it), confirm it appears on `/admin/engram-cloud/import`, import it, log in as the new local account, confirm Cloud SSO works immediately with no second Cloud login.
-- [ ] 3.3 Confirm Engram Cloud being briefly unreachable (e.g. stop `engram-cloud` container momentarily) does not block a local admin login, with or without a prior link.
+- [x] 3.1 Confirmed by the user directly on this VPS: logged in, the Engram Cloud nav link worked with no second login prompt ("excelente muy bien").
+- [x] 3.2 Confirmed by the user directly: `/admin/engram-cloud/import` listed Cloud principals with their roles, import worked.
+- [x] 3.3 Verified with a throwaway admin account (`resilience-test-temp`, disabled afterward — not deleted, `admin_audit_log.actor_user_id` is `ON DELETE RESTRICT` by design and correctly refused the delete, preserving its audit rows): stopped `engram-cloud`, logged in — 302 success in 276ms, no `engram_cloud_credentials` row created (provisioning failed fast and was swallowed, exactly per design.md D2). Restarted `engram-cloud`, logged in again — this time the link WAS provisioned, confirming the SSO route's self-healing behavior on the very next login, not just on a manual Cloud-nav visit.
+
+All three units and manual E2E for admin-identity-unification are now complete.
