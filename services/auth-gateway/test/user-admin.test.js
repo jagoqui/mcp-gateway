@@ -14,6 +14,7 @@ import {
   revokeToken,
   listManagedUsers,
   listAdminAccounts,
+  getAdminAccount,
   setUserDisabled,
   setManagedUserDisabled,
   setPassword,
@@ -294,6 +295,22 @@ test('listAdminAccounts lists only is_admin=1 rows, with role, ordered COLLATE N
   for (const row of rows) {
     assert.equal(Object.prototype.hasOwnProperty.call(row, 'password_hash'), false);
   }
+  db.close();
+});
+
+// mcp-profile-page — getAdminAccount: the admin/member mirror of
+// getManagedUser, resolving a profile page's ?userId= into a real,
+// eligible (is_admin=1) target.
+test('getAdminAccount returns an is_admin=1 row by id, with role, and undefined for a regular (is_admin=0) user or unknown id', async () => {
+  const db = openDb(':memory:');
+  const member = await createUser(db, { username: 'profile-member', password: 'x', isAdmin: true, role: 'member' });
+  const regular = await createUser(db, { username: 'profile-regular', password: 'x' });
+
+  const found = getAdminAccount(db, member.id);
+  assert.equal(found.username, 'profile-member');
+  assert.equal(found.role, 'member');
+  assert.equal(getAdminAccount(db, regular.id), undefined);
+  assert.equal(getAdminAccount(db, 999999), undefined);
   db.close();
 });
 

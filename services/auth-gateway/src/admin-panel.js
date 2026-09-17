@@ -33,6 +33,7 @@ function renderAdminNav(csrfToken) {
   <a href="/admin/console?view=cloud">Engram Cloud dashboard</a>
   <a href="/admin/console?view=monitor">Monitor</a>
   <a href="/admin/engram-cloud/import">Import from Engram Cloud</a>
+  <a href="/admin/profile">Profile</a>
   <form method="post" action="/admin/logout">
     <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
     <button type="submit">Log out</button>
@@ -69,6 +70,7 @@ export function renderConsolePage({ view, csrfToken, role = 'admin' }) {
   const body = `<div class="shell">
   <header class="shell-header">
     ${usersLink}
+    <a href="/admin/profile">Profile</a>
     <form method="post" action="/admin/logout">
       <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
       <button type="submit">Log out</button>
@@ -371,4 +373,89 @@ export function renderTokenIssuedPage({ username, userId, rawToken }) {
   <p><a href="/admin/users/tokens?userId=${userId}">Back to tokens</a></p>
 </main>`;
   return renderDocument({ title: 'Admin — Token issued', body });
+}
+
+/**
+ * One copyable MCP client config block for a single granted subproject —
+ * a read-only `<textarea>` (click-to-select-all, then Ctrl/Cmd+C) is the
+ * closest zero-JS equivalent to a real "click to copy" button under this
+ * app's CSP (`default-src 'none'`, no `script-src`) — the same
+ * constraint already accepted for the password show/hide toggle.
+ * @param {{ mcpUrl: string, rawToken: string, subproject: string }} options
+ * @returns {string}
+ */
+function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
+  const config = {
+    'engram-remote-mcp': {
+      type: 'http',
+      url: mcpUrl,
+      headers: {
+        Authorization: `Bearer ${rawToken}`,
+        'X-Engram-Subproject': subproject,
+      },
+    },
+  };
+  return `<div class="mcp">
+  <h2>${escapeHtml(subproject)}</h2>
+  <textarea readonly rows="8">${escapeHtml(JSON.stringify(config, null, 2))}</textarea>
+</div>`;
+}
+
+/**
+ * GET /admin/profile[?userId=N] (mcp-profile-page) — one account's MCP
+ * client config (Bearer token + granted subprojects), self-service for
+ * both admin and member. `rawToken` is only ever non-null on the
+ * request that just issued/regenerated it (D10) — every later view
+ * shows `tokenMeta` instead, with no live secret anywhere on the page.
+ *
+ * No real "click to copy" button exists here — this app's CSP
+ * (`default-src 'none'`, no `script-src`) makes that impossible, the
+ * same constraint already accepted for the password show/hide toggle.
+ * The read-only `<textarea>` is the closest equivalent: click inside,
+ * Ctrl/Cmd+A, then copy.
+ * @param {{
+ *   target: { id: number, username: string, role: string },
+ *   subprojects: string[],
+ *   rawToken: string | null,
+ *   tokenMeta: { id: number, label: string | null, created_at: string, last_used_at: string | null } | null,
+ *   mcpUrl: string,
+ *   csrfToken: string,
+ * }} options
+ * @returns {string}
+ */
+export function renderProfilePage({ target, subprojects, rawToken, tokenMeta, mcpUrl, csrfToken }) {
+  const configBlocks = rawToken
+    ? subprojects.map((subproject) => renderMcpConfigBlock({ mcpUrl, rawToken, subproject })).join('\n')
+    : '';
+  const noGrantsNote =
+    rawToken && subprojects.length === 0
+      ? '<p class="note">No Engram Cloud project grants yet — ask an admin, then reload this page.</p>'
+      : '';
+  const existingTokenMarkup =
+    !rawToken && tokenMeta
+      ? `<div class="mcp">
+    <h2>Current token</h2>
+    <p class="note">Label: ${escapeHtml(tokenMeta.label ?? '(no label)')} — created ${escapeHtml(tokenMeta.created_at)} — last used ${escapeHtml(tokenMeta.last_used_at ?? 'never')}.</p>
+    <p class="note">The raw value is never shown again after it was issued — regenerate to get a fresh, copyable one.</p>
+    ${
+      subprojects.length > 0
+        ? `<p>Granted subprojects: ${subprojects.map((s) => escapeHtml(s)).join(', ')}</p>`
+        : '<p class="note">No Engram Cloud project grants yet.</p>'
+    }
+    <form method="post" action="/admin/profile/regenerate-token">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <input type="hidden" name="tokenId" value="${tokenMeta.id}">
+      <input type="hidden" name="userId" value="${target.id}">
+      <button type="submit">Regenerate</button>
+    </form>
+  </div>`
+      : '';
+  const body = `<main>
+  <h1>Profile: ${escapeHtml(target.username)} (${escapeHtml(target.role)})</h1>
+  ${rawToken ? '<p class="error">Copy this now — the token will not be shown again.</p>' : ''}
+  ${configBlocks}
+  ${noGrantsNote}
+  ${existingTokenMarkup}
+</main>`;
+  return renderDocument({ title: `Admin — Profile: ${target.username}`, body });
 }

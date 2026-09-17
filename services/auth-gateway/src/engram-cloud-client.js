@@ -103,6 +103,17 @@ export function grantProject({ principalId, project }) {
 }
 
 /**
+ * Lists a principal's project grants (GET /admin/users/{id}/grants) —
+ * confirmed real via deepwiki against engram's own source
+ * (handleAdminListGrants/ListProjectGrants), not guessed.
+ * @param {{ principalId: string }} opts
+ * @returns {Promise<Array<{ principal_id: string, project: string, granted_by_principal_id: string, created_at: string }>>}
+ */
+export function listGrants({ principalId }) {
+  return engramCloudRequest(`/admin/users/${encodeURIComponent(principalId)}/grants`);
+}
+
+/**
  * Issues a token for a user (POST /admin/users/{id}/tokens) — the raw value
  * is returned exactly once in the response body, never persisted here or
  * anywhere upstream of the caller.

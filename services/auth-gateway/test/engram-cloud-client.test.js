@@ -5,6 +5,7 @@ import {
   listUsers,
   createUser,
   grantProject,
+  listGrants,
   issueToken,
   loginDashboard,
 } from '../src/engram-cloud-client.js';
@@ -91,6 +92,27 @@ test('grantProject sends POST /admin/users/:id/grants with the project body', as
 
 test('grantProject URL-encodes a principalId containing special characters', async () => {
   await grantProject({ principalId: 'p/2 x', project: 'acme' });
+  assert.equal(lastRequest.url, '/admin/users/p%2F2%20x/grants');
+});
+
+test('listGrants sends GET /admin/users/:id/grants, no body, and returns the array as-is', async () => {
+  nextResponse = {
+    status: 200,
+    body: [
+      { principal_id: 'p2', project: 'jagoqui.demo', granted_by_principal_id: 'p1', created_at: '2026-01-01T00:00:00Z' },
+    ],
+  };
+  const result = await listGrants({ principalId: 'p2' });
+  assert.equal(lastRequest.method, 'GET');
+  assert.equal(lastRequest.url, '/admin/users/p2/grants');
+  assert.equal(lastRequest.body, '');
+  assert.deepEqual(result, [
+    { principal_id: 'p2', project: 'jagoqui.demo', granted_by_principal_id: 'p1', created_at: '2026-01-01T00:00:00Z' },
+  ]);
+});
+
+test('listGrants URL-encodes a principalId containing special characters', async () => {
+  await listGrants({ principalId: 'p/2 x' });
   assert.equal(lastRequest.url, '/admin/users/p%2F2%20x/grants');
 });
 

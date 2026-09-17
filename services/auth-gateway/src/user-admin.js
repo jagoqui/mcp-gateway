@@ -346,6 +346,22 @@ export function listAdminAccounts(db) {
 }
 
 /**
+ * Looks up one admin-panel account (is_admin=1) by id, with its role —
+ * the mirror of getManagedUser, used to resolve a profile page's
+ * `?userId=` into a real, eligible target (mcp-profile-page).
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @returns {{ id: number, username: string, role: string, disabled_at: string | null } | undefined}
+ */
+export function getAdminAccount(db, userId) {
+  return /** @type {any} */ (
+    db
+      .prepare('SELECT id, username, role, disabled_at FROM users WHERE id = ? AND is_admin = 1')
+      .get(userId)
+  );
+}
+
+/**
  * Lists a user's tokens via an explicit column list — token_hash never
  * reaches this projection (A11, R8-style precedent).
  * @param {import('better-sqlite3').Database} db

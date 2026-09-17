@@ -16,6 +16,7 @@ import {
   renderTokenIssuedPage,
   renderConsolePage,
   renderImportPage,
+  renderProfilePage,
 } from './admin-panel.js';
 import { isAcceptableOrigin, verifyAdminCsrfToken, issueAdminCsrfToken } from './csrf.js';
 import { createLoginThrottle } from './admin-throttle.js';
@@ -23,10 +24,12 @@ import { recordAudit } from './admin-audit.js';
 import {
   listManagedUsers,
   listAdminAccounts,
+  getAdminAccount,
   createManagedUser,
   setManagedUserDisabled,
   getManagedUser,
   listTokensForUser,
+  issueToken as issueMcpToken,
   issueManagedToken,
   revokeManagedToken,
   regenerateToken,
@@ -36,6 +39,7 @@ import {
   listUsers as listEngramCloudUsers,
   createUser as createEngramCloudUser,
   grantProject as grantEngramCloudProject,
+  listGrants as listEngramCloudGrants,
   issueToken as issueEngramCloudToken,
   loginDashboard as loginEngramCloudDashboard,
 } from './engram-cloud-client.js';
@@ -1593,6 +1597,200 @@ async function handlePostEngramCloudImport(req, res, db, config) {
 }
 
 /**
+ * Resolves a `?userId=`/body `userId` into the profile target
+ * (mcp-profile-page): absent → self, for anyone. Present → only an
+ * admin may target a DIFFERENT admin-panel account; a member is
+ * rejected outright, even if the id happens to be their own (keeps this
+ * one rule simple — self is reached by omitting the param, never by
+ * supplying it).
+ * @param {import('node:http').ServerResponse} res
+ * @param {{ id: number, role: string }} admin
+ * @param {string | null} requestedUserId
+ * @param {import('better-sqlite3').Database} db
+ * @returns {{ id: number, username: string, role: string, disabled_at: string | null } | null} the target, or null if a response was already sent
+ */
+function resolveProfileTarget(res, admin, requestedUserId, db) {
+  if (requestedUserId === null) {
+    return admin;
+  }
+  if (admin.role !== 'admin') {
+    sendJson(res, 403, { error: 'admin_role_required' });
+    return null;
+  }
+  const found = getAdminAccount(db, Number(requestedUserId));
+  if (!found) {
+    sendJson(res, 404, { error: 'not_found' });
+    return null;
+  }
+  return found;
+}
+
+/**
+ * GET /admin/profile[?userId=N] (mcp-profile-page) — reachable by BOTH
+ * admin and member (the only admin-app.js route besides the SSO route
+ * itself with that property), unlike every other route this session.
+ * Auto-issues an MCP Bearer token (`tokens` table, same one `/mcp/*`
+ * routes already check via `authenticateWithMethod` — no new table) the
+ * first time a target has none, same lazy pattern as
+ * `ensureEngramCloudLink`. The raw value is only ever shown on the
+ * request that just issued it (D10: `tokens.token_hash` never lets it be
+ * retrieved again) — a later visit renders metadata + a Regenerate form
+ * instead.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {URL} url
+ * @param {{ domain: string }} config
+ */
+async function handleGetAdminProfile(req, res, db, url, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/admin/login?next=%2Fadmin%2Fprofile' });
+      res.end();
+      return;
+    }
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const target = resolveProfileTarget(res, admin, url.searchParams.get('userId'), db);
+  if (!target) {
+    return;
+  }
+
+  // Self-heal the Cloud link exactly like the SSO route does (D2:
+  // swallowed — a Cloud outage must never break this page, just show an
+  // empty grants list).
+  try {
+    await ensureEngramCloudLink(db, target);
+  } catch {
+    // swallowed
+  }
+
+  const linkRow = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(target.id)
+  );
+  /** @type {string[]} */
+  let subprojects = [];
+  if (linkRow) {
+    try {
+      const grants = await listEngramCloudGrants({ principalId: linkRow.principal_id });
+      const prefix = `${target.username}.`;
+      subprojects = grants
+        .filter((/** @type {any} */ g) => g.project.startsWith(prefix))
+        .map((/** @type {any} */ g) => g.project.slice(prefix.length));
+    } catch {
+      // swallowed — same reasoning as the Cloud-link self-heal above
+    }
+  }
+
+  const existingTokens = listTokensForUser(db, target.id);
+  const activeToken = existingTokens.find((/** @type {any} */ t) => !t.revoked_at);
+
+  let rawToken = null;
+  let tokenMeta = activeToken ?? null;
+  if (!activeToken) {
+    const issued = issueMcpToken(db, { userId: target.id, label: 'mcp-profile' });
+    rawToken = issued.rawToken;
+    tokenMeta = listTokensForUser(db, target.id).find((/** @type {any} */ t) => !t.revoked_at);
+  }
+
+  const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
+  res.writeHead(200, ADMIN_PAGE_HEADERS);
+  res.end(
+    renderProfilePage({
+      target,
+      subprojects,
+      rawToken,
+      tokenMeta,
+      mcpUrl: `https://${config.domain}/mcp/engram`,
+      csrfToken,
+    }),
+  );
+}
+
+/**
+ * POST /admin/profile/regenerate-token (mcp-profile-page) — full 5-step
+ * admin write guard, then `regenerateToken` (already existed, D8) scoped
+ * to self for anyone, or a chosen `userId` for an admin only. Reachable
+ * by both roles, same as the GET route above.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminProfileRegenerateToken(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  const { tokenId, userId } = data ?? {};
+  const target = resolveProfileTarget(res, admin, userId !== undefined ? String(userId) : null, db);
+  if (!target) {
+    return;
+  }
+
+  const redirectTarget =
+    target.id === admin.id ? '/admin/profile' : `/admin/profile?userId=${target.id}`;
+
+  try {
+    regenerateToken(db, {
+      tokenId: Number(tokenId),
+      userId: target.id,
+      actorUserId: admin.id,
+      actorLabel: admin.username,
+    });
+  } catch {
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  if (isForm) {
+    res.writeHead(302, { Location: redirectTarget });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
@@ -1683,6 +1881,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/engram-cloud/import') {
     await handlePostEngramCloudImport(req, res, db, config);
+    return true;
+  }
+
+  if (req.method === 'GET' && pathname === '/admin/profile') {
+    await handleGetAdminProfile(req, res, db, url, config);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/profile/regenerate-token') {
+    await handlePostAdminProfileRegenerateToken(req, res, db, config);
     return true;
   }
 

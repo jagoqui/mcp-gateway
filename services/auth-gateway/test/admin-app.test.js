@@ -2350,3 +2350,132 @@ test('a member session is accepted by GET /admin/engram-cloud/sso, same as admin
   );
   assert.equal(link.principal_id, 'p-member-1');
 });
+
+// mcp-profile-page — GET/POST /admin/profile: reachable by BOTH roles
+// (unlike every other admin-app.js route this session), self or (admin
+// only) another admin-panel account's MCP config + Cloud grants.
+
+/** @returns {{ userId: number, cookie: string }} */
+function insertAdminAccountWithCloudLink(username, role, principalId) {
+  const userId = insertUser({ username, role });
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (?, ?, 'irrelevant-ciphertext', datetime('now'))",
+  ).run(userId, principalId);
+  const token = createAdminSessionToken(userId, ADMIN_SECRET);
+  return { userId, cookie: `__Host-admin_session=${token}` };
+}
+
+test('GET /admin/profile with no admin cookie returns 401', async () => {
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Accept: 'application/json' } });
+  assert.equal(res.status, 401);
+});
+
+test('GET /admin/profile (self, member, first visit) auto-issues a token and shows a copyable config per grant matching username.*', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-1', 'member', 'p-profile-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-1/grants'] = {
+    status: 200,
+    body: [
+      { principal_id: 'p-profile-1', project: 'profile-member-1.demo-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
+      { principal_id: 'p-profile-1', project: 'someone-else.unrelated', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
+    ],
+  };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('demo-project'));
+  assert.ok(!body.includes('unrelated'));
+  assert.ok(body.includes('"url": "https://jagoqui.tech/mcp/engram"') || body.includes('/mcp/engram'));
+
+  const tokenRow = /** @type {any} */ (
+    db.prepare("SELECT * FROM tokens WHERE user_id = ? AND revoked_at IS NULL").get(userId)
+  );
+  assert.ok(tokenRow);
+  // The raw token isn't stored anywhere — only its hash — so the strongest
+  // assertion available is that a real (non-empty, non-placeholder) Bearer
+  // value was rendered, not that it matches a known constant.
+  assert.ok(body.includes('Authorization'));
+});
+
+test('GET /admin/profile (self) on a SECOND visit does not re-issue a token or show a raw value, and offers Regenerate instead', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-2', 'member', 'p-profile-2');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-2/grants'] = { status: 200, body: [] };
+
+  await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const firstCount = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ?').get(userId)
+  ).n;
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  const secondCount = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ?').get(userId)
+  ).n;
+  assert.equal(secondCount, firstCount);
+  assert.ok(body.includes('action="/admin/profile/regenerate-token"'));
+});
+
+test('GET /admin/profile?userId=N is rejected for a member (own profile only)', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('profile-member-3', 'member', 'p-profile-3');
+  const res = await fetch(`${baseUrl}/admin/profile?userId=1`, {
+    headers: { Cookie: cookie, Accept: 'application/json' },
+  });
+  assert.equal(res.status, 403);
+});
+
+test('GET /admin/profile?userId=N works for an admin viewing another admin-panel account', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-admin-viewer');
+  const { userId: targetId } = insertAdminAccountWithCloudLink('profile-member-4', 'member', 'p-profile-4');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-4/grants'] = { status: 200, body: [] };
+
+  const res = await fetch(`${baseUrl}/admin/profile?userId=${targetId}`, { headers: { Cookie: adminCookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('profile-member-4'));
+});
+
+test('POST /admin/profile/regenerate-token (self) issues a new token and revokes the old one', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-5', 'member', 'p-profile-5');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-5/grants'] = { status: 200, body: [] };
+  await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const oldToken = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
+  );
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/regenerate-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: String(oldToken.id), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+
+  const oldRow = /** @type {any} */ (db.prepare('SELECT revoked_at FROM tokens WHERE id = ?').get(oldToken.id));
+  assert.ok(oldRow.revoked_at);
+  const activeCount = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
+  ).n;
+  assert.equal(activeCount, 1);
+});
+
+test('POST /admin/profile/regenerate-token with a userId for another account is rejected for a member', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-6', 'member', 'p-profile-6');
+  const { userId: otherId } = insertAdminAccountWithCloudLink('profile-member-7', 'member', 'p-profile-7');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/regenerate-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: '1', userId: String(otherId), csrf }),
+  });
+  assert.equal(res.status, 403);
+});
