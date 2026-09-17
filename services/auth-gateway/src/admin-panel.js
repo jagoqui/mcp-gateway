@@ -144,6 +144,7 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
   ${renderAdminNav(csrfToken)}
   <h1>Users</h1>
   ${errorMarkup}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Username</th><th>Status</th><th>Active tokens</th><th>Revoked tokens</th><th></th><th></th></tr>
@@ -152,6 +153,7 @@ export function renderUsersPage({ users, csrfToken, errorCode }) {
       ${rows}
     </tbody>
   </table>
+  </div>
   <h2>Create user</h2>
   <form method="post" action="/admin/users">
     <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
@@ -215,6 +217,7 @@ export function renderImportPage({ principals, csrfToken, errorCode }) {
   <h1>Import from Engram Cloud</h1>
   <p class="note">Engram Cloud principals with no local account yet.</p>
   ${errorMarkup}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Cloud username</th><th>Cloud role</th><th></th></tr>
@@ -223,6 +226,7 @@ export function renderImportPage({ principals, csrfToken, errorCode }) {
       ${rows}
     </tbody>
   </table>
+  </div>
 </main>`;
   return renderDocument({ title: 'Admin — Import from Engram Cloud', body });
 }
@@ -294,6 +298,7 @@ export function renderTokensPage({ username, userId, tokens, csrfToken, errorCod
   <h1>Tokens for ${escapeHtml(username)}</h1>
   <p><a href="/admin/users">Back to users</a></p>
   ${errorMarkup}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
@@ -302,6 +307,7 @@ export function renderTokensPage({ username, userId, tokens, csrfToken, errorCod
       ${rows}
     </tbody>
   </table>
+  </div>
   <h2>Issue token</h2>
   <form method="post" action="/admin/tokens/issue">
     <input type="hidden" name="userId" value="${userId}">
