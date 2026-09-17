@@ -2281,12 +2281,22 @@ test('POST /admin/login still redirects an admin to /admin/users, unchanged', as
   assert.equal(res.headers.get('location'), '/admin/users');
 });
 
-test('a member session is rejected by GET /admin/users', async () => {
+test('a member session is rejected by GET /admin/users (JSON caller)', async () => {
   const { cookie } = loginAsMember();
   const res = await fetch(`${baseUrl}/admin/users`, {
     headers: { Cookie: cookie, Accept: 'application/json' },
   });
   assert.equal(res.status, 403);
+});
+
+test('a member session on GET /admin/users with Accept: text/html is redirected to the console cloud view, not a raw JSON 403', async () => {
+  const { cookie } = loginAsMember();
+  const res = await fetch(`${baseUrl}/admin/users`, {
+    headers: { Cookie: cookie, Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/console?view=cloud');
 });
 
 test('a member session is rejected by GET /admin/engram-cloud/import', async () => {

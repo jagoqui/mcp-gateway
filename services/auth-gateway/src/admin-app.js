@@ -128,12 +128,26 @@ function sendJson(res, status, body) {
  * for anyone reaching this check (it means "can reach the admin-panel
  * login gate at all") — `role` is the finer admin/member distinction
  * WITHIN that.
+ *
+ * Dual-mode, same `wantsHtml` idiom as every other auth check in this
+ * dispatcher (found live, 2026-09-17: a member landing here via a direct
+ * navigation — a bookmark, a stale `next`, typing the URL — got a raw
+ * JSON body instead of ending up back on the one surface they can use).
+ * A JSON/API caller (the Phase 3 Cloud proxy's real consumer, Monitor's
+ * own SPA) still gets a clean 403, never a redirect it can't follow
+ * usefully.
+ * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {{ role: string }} admin
  * @returns {boolean} true if rejected — caller MUST return immediately
  */
-function rejectNonAdminRole(res, admin) {
+function rejectNonAdminRole(req, res, admin) {
   if (admin.role !== 'admin') {
+    if (wantsHtml(req.headers.accept)) {
+      res.writeHead(302, { Location: '/admin/console?view=cloud' });
+      res.end();
+      return true;
+    }
     sendJson(res, 403, { error: 'admin_role_required' });
     return true;
   }
@@ -485,7 +499,7 @@ function handleGetAdminUsers(req, res, db, url) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -517,7 +531,7 @@ async function handlePostAdminUsers(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -631,7 +645,7 @@ async function handlePostAdminUserDisabled(req, res, db, config, disabled) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -740,7 +754,7 @@ function handleGetAdminTokens(req, res, db, url) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -797,7 +811,7 @@ async function handlePostAdminTokensIssue(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -901,7 +915,7 @@ async function beginTokenWrite(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return null;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return null;
   }
 
@@ -1104,7 +1118,7 @@ async function beginEngramCloudWrite(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return null;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return null;
   }
 
@@ -1176,7 +1190,7 @@ async function handleGetEngramCloudUsers(req, res, db) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -1414,7 +1428,7 @@ async function handleGetEngramCloudImport(req, res, db, url) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
@@ -1463,7 +1477,7 @@ async function handlePostEngramCloudImport(req, res, db, config) {
     sendJson(res, 401, { error: 'unauthenticated' });
     return;
   }
-  if (rejectNonAdminRole(res, admin)) {
+  if (rejectNonAdminRole(req, res, admin)) {
     return;
   }
 
