@@ -19,6 +19,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'token.revoke',
   'token.regenerate',
   'cloud_token.revoke',
+  'project.grant',
 ]);
 
 /**
@@ -26,7 +27,14 @@ export const AUDIT_ACTIONS = Object.freeze([
  * bcrypt hash must never reach this table (R8-style precedent).
  * @type {ReadonlyArray<string>}
  */
-const DETAIL_ALLOWED_KEYS = Object.freeze(['username', 'label', 'reason', 'revokedTokenId', 'cloudTokenId']);
+const DETAIL_ALLOWED_KEYS = Object.freeze([
+  'username',
+  'label',
+  'reason',
+  'revokedTokenId',
+  'cloudTokenId',
+  'project',
+]);
 
 /**
  * @param {Record<string, unknown> | null | undefined} detail

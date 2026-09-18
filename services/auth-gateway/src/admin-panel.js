@@ -14,6 +14,7 @@ export const ADMIN_PANEL_ERRORS = Object.freeze({
   not_found: 'That user could not be found.',
   mismatch: 'Password and confirmation must match.',
   unreachable: 'Engram Cloud is unreachable right now. Try again shortly.',
+  invalid_project: 'Enter a project name.',
 });
 
 /**
@@ -568,6 +569,67 @@ function renderProfileCloudTokensSection(cloudTokens, target, viewerId, csrfToke
 }
 
 /**
+ * One row of the Projects table — a grant's full metadata (`project`,
+ * who granted it, when), not just the bare name already used in the MCP
+ * config blocks above.
+ * @param {{ project: string, granted_by_principal_id: string, created_at: string }} grant
+ * @returns {string}
+ */
+function renderProfileGrantRow(grant) {
+  return `<tr>
+    <td>${escapeHtml(grant.project)}</td>
+    <td>${escapeHtml(grant.granted_by_principal_id)}</td>
+    <td>${escapeHtml(grant.created_at)}</td>
+  </tr>`;
+}
+
+/**
+ * Projects section — full grant metadata, plus (admin only) a "Grant" form.
+ * Deny-by-default (user-requested 2026-09-18, quoting Cloud's own model:
+ * "New managed users are deny-by-default: they cannot sync any project
+ * until an admin grants one explicitly"): granting is ALWAYS admin-only,
+ * even when an admin is viewing (or granting to) their own profile — a
+ * member never sees this form at all, regardless of whose profile page
+ * they're on (self is the only profile a member can ever reach anyway).
+ * @param {Array<{ project: string, granted_by_principal_id: string, created_at: string }>} grants
+ * @param {{ id: number }} target
+ * @param {{ id: number, role: string }} viewer
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderProfileProjectsSection(grants, target, viewer, csrfToken) {
+  const rows = grants.map((grant) => renderProfileGrantRow(grant)).join('\n');
+  const table =
+    grants.length > 0
+      ? `<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Project</th><th>Granted by</th><th>Granted at</th></tr>
+    </thead>
+    <tbody>
+      ${rows}
+    </tbody>
+  </table>
+  </div>`
+      : '<p class="note">No shared Engram Cloud project grants yet.</p>';
+  const userIdField =
+    target.id !== viewer.id ? `<input type="hidden" name="userId" value="${target.id}">` : '';
+  const grantForm =
+    viewer.role === 'admin'
+      ? `<form method="post" action="/admin/profile/grant-project">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      ${userIdField}
+      <label>Project <input type="text" name="project" autocomplete="off" required></label>
+      <button type="submit">Grant</button>
+    </form>`
+      : '';
+  return `<h2>Projects</h2>
+  <p class="note">The default (private) project above is always usable, no grant needed — this list is only SHARED projects, each gated by an explicit grant.</p>
+  ${table}
+  ${grantForm}`;
+}
+
+/**
  * GET /admin/profile[?userId=N] (mcp-profile-page) — one account's MCP
  * client config (Bearer token + granted subprojects), self-service for
  * both admin and member, PLUS full lifecycle for both token systems this
@@ -587,11 +649,13 @@ function renderProfileCloudTokensSection(cloudTokens, target, viewerId, csrfToke
  *   target: { id: number, username: string, role: string },
  *   viewer: { username: string, role: string, id: number },
  *   subprojects: string[],
+ *   grants: Array<{ project: string, granted_by_principal_id: string, created_at: string }>,
  *   rawToken: string | null,
  *   gatewayTokens: Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
  *   cloudTokens: Array<{ id: string, name: string | null, token_prefix: string, created_at: string, last_used_at: string | null, revoked_at: string | null, revocation_reason: string | null }> | null,
  *   mcpUrl: string,
  *   csrfToken: string,
+ *   errorCode?: string | null,
  * }} options
  * @returns {string}
  */
@@ -599,11 +663,13 @@ export function renderProfilePage({
   target,
   viewer,
   subprojects,
+  grants,
   rawToken,
   gatewayTokens,
   cloudTokens,
   mcpUrl,
   csrfToken,
+  errorCode,
 }) {
   const configBlocks = rawToken
     ? [
@@ -611,20 +677,19 @@ export function renderProfilePage({
         ...subprojects.map((subproject) => renderMcpConfigBlock({ mcpUrl, rawToken, subproject })),
       ].join('\n')
     : '';
-  const noGrantsNote =
-    subprojects.length === 0
-      ? rawToken
-        ? '<p class="note">No shared Engram Cloud project grants yet — ask an admin for one. Your default (private) config above always works.</p>'
-        : '<p class="note">No shared Engram Cloud project grants yet.</p>'
-      : '';
+  const errorMessage =
+    errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
+      ? ADMIN_PANEL_ERRORS[errorCode]
+      : null;
+  const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
   const body = `<main>
   <p class="note">Logged in as ${escapeHtml(viewer.username)} (${escapeHtml(viewer.role)})</p>
   ${viewer.role === 'admin' ? '<p><a href="/admin/users">Back to users</a></p>' : ''}
   <h1>Profile: ${escapeHtml(target.username)} (${escapeHtml(target.role)})</h1>
+  ${errorMarkup}
   ${rawToken ? '<p class="error">Copy this now — the token will not be shown again.</p>' : ''}
   ${configBlocks}
-  ${noGrantsNote}
-  ${!rawToken && subprojects.length > 0 ? `<p>Granted subprojects: ${subprojects.map((s) => escapeHtml(s)).join(', ')}</p>` : ''}
+  ${renderProfileProjectsSection(grants, target, viewer, csrfToken)}
   ${renderProfileGatewayTokensSection(gatewayTokens, target, viewer.id, csrfToken)}
   ${renderProfileCloudTokensSection(cloudTokens, target, viewer.id, csrfToken)}
 </main>`;

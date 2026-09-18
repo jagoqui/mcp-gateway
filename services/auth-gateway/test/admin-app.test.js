@@ -2834,6 +2834,185 @@ test('POST /admin/profile/cloud-token/revoke redirects with error=not_found (for
   assert.ok(res.headers.get('location')?.includes('error=not_found'));
 });
 
+// Projects section (user-requested 2026-09-18): show which Cloud
+// projects a profile has access to, plus an admin-only way to grant a
+// new one, quoting Cloud's own deny-by-default model.
+
+test('GET /admin/profile shows a Projects section with full grant metadata', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('profile-projects-1', 'admin', 'p-profile-projects-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-projects-1/grants'] = {
+    status: 200,
+    body: [
+      { principal_id: 'p-profile-projects-1', project: 'demo-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
+    ],
+  };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-projects-1/tokens'] = { status: 200, body: [] };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('Projects'));
+  assert.ok(body.includes('demo-project'));
+  assert.ok(body.includes('p-admin'));
+  assert.ok(body.includes('2026-01-01T00:00:00Z'));
+});
+
+test('GET /admin/profile shows the Grant form for an admin, but NEVER for a member (deny-by-default)', async () => {
+  const { cookie: memberCookie } = insertAdminAccountWithCloudLink('profile-projects-2', 'member', 'p-profile-projects-2');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-projects-2/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-projects-2/tokens'] = { status: 200, body: [] };
+  const memberRes = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: memberCookie } });
+  const memberBody = await memberRes.text();
+  assert.ok(!memberBody.includes('action="/admin/profile/grant-project"'));
+
+  const { cookie: adminCookie } = loginAsAdmin('profile-projects-admin');
+  const adminRes = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: adminCookie } });
+  const adminBody = await adminRes.text();
+  assert.ok(adminBody.includes('action="/admin/profile/grant-project"'));
+});
+
+test('POST /admin/profile/grant-project (admin, self) grants the project and records an audit row', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-grant-1');
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('profile-grant-1')).id;
+  engramCloudResponsesByRoute['POST /admin/users'] = {
+    status: 200,
+    body: { principal_id: 'p-grant-1' },
+  };
+  engramCloudResponsesByRoute['POST /admin/users/p-grant-1/tokens'] = {
+    status: 200,
+    body: { raw_token: 'irrelevant', token: { id: 't1' } },
+  };
+  // Trigger ensureEngramCloudLink's provisioning (self-heal) by visiting first.
+  await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: adminCookie } });
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/grant-project`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ project: 'demo-project', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(lastEngramCloudRequest?.method, 'POST');
+  assert.equal(lastEngramCloudRequest?.url, '/admin/users/p-grant-1/grants');
+  assert.deepEqual(JSON.parse(/** @type {string} */ (lastEngramCloudRequest?.body)), { project: 'demo-project' });
+
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'project.grant'").all()
+  );
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].outcome, 'success');
+  assert.equal(auditRows[0].target_user_id, adminId);
+  assert.deepEqual(JSON.parse(auditRows[0].detail), { project: 'demo-project' });
+});
+
+test('POST /admin/profile/grant-project works for an admin granting a target account a project', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-grant-admin');
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('profile-grant-admin')).id;
+  const { userId: targetId } = insertAdminAccountWithCloudLink('profile-grant-2', 'member', 'p-grant-2');
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/grant-project`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ project: 'shared-project', userId: String(targetId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), `/admin/profile?userId=${targetId}`);
+  assert.equal(lastEngramCloudRequest?.url, '/admin/users/p-grant-2/grants');
+});
+
+test('POST /admin/profile/grant-project is rejected for a member, even targeting themselves with no userId', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-grant-3', 'member', 'p-grant-3');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/grant-project`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ project: 'demo-project', csrf }),
+  });
+  assert.equal(res.status, 403);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('POST /admin/profile/grant-project with an empty project name redirects with error=invalid_project', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-grant-4');
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('profile-grant-4')).id;
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/grant-project`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ project: '   ', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(res.headers.get('location')?.includes('error=invalid_project'));
+});
+
+test('POST /admin/profile/grant-project redirects with error=not_found when the target has no Cloud link', async () => {
+  const userId = insertUser({ username: 'profile-grant-nolink', isAdmin: true, role: 'admin' });
+  const cookie = `__Host-admin_session=${createAdminSessionToken(userId, ADMIN_SECRET)}`;
+  nextEngramCloudResponse = { status: 500, body: { error: 'unreachable' } };
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/grant-project`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ project: 'demo-project', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(res.headers.get('location')?.includes('error=not_found'));
+});
+
+test('POST /admin/profile/grant-project redirects with error=unreachable (and audits a failure) when Cloud rejects the grant', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-grant-5');
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('profile-grant-5')).id;
+  const { userId: targetId } = insertAdminAccountWithCloudLink('profile-grant-6', 'member', 'p-grant-6');
+  engramCloudResponsesByRoute['POST /admin/users/p-grant-6/grants'] = { status: 500, body: { error: 'boom' } };
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/grant-project`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ project: 'demo-project', userId: String(targetId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(res.headers.get('location')?.includes('error=unreachable'));
+
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'project.grant'").all()
+  );
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].outcome, 'failure');
+});
+
 // engram-shared-projects — GET /internal/engram-grant: service-to-service
 // only (shared secret, no admin session), checked once by engram-router's
 // cold spawn path before allowing a client into a shared (non-private)

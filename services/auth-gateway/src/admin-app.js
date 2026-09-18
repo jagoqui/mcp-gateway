@@ -1685,7 +1685,7 @@ async function handleGetAdminProfile(req, res, db, url, config) {
     return;
   }
 
-  await sendProfilePage(res, db, admin, target, config);
+  await sendProfilePage(res, db, admin, target, config, null, url.searchParams.get('error'));
 }
 
 /**
@@ -1705,8 +1705,9 @@ async function handleGetAdminProfile(req, res, db, url, config) {
  * @param {{ id: number, username: string, role: string }} target
  * @param {{ domain: string }} config
  * @param {string | null} [forcedRawToken]
+ * @param {string | null} [errorCode]
  */
-async function sendProfilePage(res, db, admin, target, config, forcedRawToken = null) {
+async function sendProfilePage(res, db, admin, target, config, forcedRawToken = null, errorCode = null) {
   // Self-heal the Cloud link exactly like the SSO route does (D2:
   // swallowed — a Cloud outage must never break this page, just show an
   // empty grants list).
@@ -1721,11 +1722,14 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
   );
   /** @type {string[]} */
   let subprojects = [];
+  /** @type {any[]} */
+  let grants = [];
   /** @type {any[] | null} */
   let cloudTokens = null;
   if (linkRow) {
     try {
-      const grants = await listEngramCloudGrants({ principalId: linkRow.principal_id });
+      const result = await listEngramCloudGrants({ principalId: linkRow.principal_id });
+      grants = Array.isArray(result) ? result : [];
       // engram-shared-projects: a grant's `project` field is an arbitrary
       // string, used VERBATIM as X-Engram-Subproject — no identity prefix
       // is stripped or assumed here (an earlier version of this code did,
@@ -1768,11 +1772,13 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
       target,
       viewer: { username: admin.username, role: admin.role, id: admin.id },
       subprojects,
+      grants,
       rawToken,
       gatewayTokens,
       cloudTokens,
       mcpUrl: `https://${config.domain}/mcp/engram`,
       csrfToken,
+      errorCode,
     }),
   );
 }
@@ -2063,6 +2069,143 @@ async function handlePostAdminProfileCloudTokenRevoke(req, res, db, config) {
 }
 
 /**
+ * POST /admin/profile/grant-project (mcp-profile-page) — ADMIN-ONLY,
+ * regardless of target: Cloud's own model is deny-by-default (user-quoted,
+ * 2026-09-18: "New managed users are deny-by-default: they cannot sync any
+ * project until an admin grants one explicitly"), so this is never
+ * reachable by a member for any target, including their own profile —
+ * unlike every other `/admin/profile/*` write above, which use
+ * `resolveProfileTarget`'s self-for-anyone rule. `rejectNonAdminRole` is
+ * checked FIRST, before `resolveProfileTarget` is ever called, since that
+ * helper's own role gate only fires when a `userId` is actually present —
+ * a member calling this with no `userId` (targeting themselves) would
+ * otherwise slip through.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminProfileGrantProject(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+  if (rejectNonAdminRole(req, res, admin)) {
+    return;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  const { project, userId } = data ?? {};
+  const target = resolveProfileTarget(res, admin, userId !== undefined ? String(userId) : null, db);
+  if (!target) {
+    return;
+  }
+
+  const redirectTarget =
+    target.id === admin.id ? '/admin/profile' : `/admin/profile?userId=${target.id}`;
+
+  if (typeof project !== 'string' || !project.trim()) {
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=invalid_project` });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  // Self-heal exactly like every other profile-page write above — a
+  // target with no Cloud link yet still gets one provisioned on demand.
+  try {
+    await ensureEngramCloudLink(db, target);
+  } catch {
+    // swallowed — the linkRow check right below is the real gate
+  }
+  const linkRow = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(target.id)
+  );
+  if (!linkRow) {
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  try {
+    await grantEngramCloudProject({ principalId: linkRow.principal_id, project });
+  } catch {
+    const runFailureAudit = db.transaction(() => {
+      recordAudit(db, {
+        actorUserId: admin.id,
+        actorLabel: admin.username,
+        action: 'project.grant',
+        outcome: 'failure',
+        targetUserId: target.id,
+        detail: { project },
+      });
+    });
+    runFailureAudit();
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=unreachable` });
+      res.end();
+      return;
+    }
+    sendJson(res, 502, { error: 'engram_cloud_unreachable' });
+    return;
+  }
+
+  const runSuccessAudit = db.transaction(() => {
+    recordAudit(db, {
+      actorUserId: admin.id,
+      actorLabel: admin.username,
+      action: 'project.grant',
+      outcome: 'success',
+      targetUserId: target.id,
+      detail: { project },
+    });
+  });
+  runSuccessAudit();
+
+  if (isForm) {
+    res.writeHead(302, { Location: redirectTarget });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
@@ -2168,6 +2311,11 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/profile/cloud-token/revoke') {
     await handlePostAdminProfileCloudTokenRevoke(req, res, db, config);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/profile/grant-project') {
+    await handlePostAdminProfileGrantProject(req, res, db, config);
     return;
   }
 
