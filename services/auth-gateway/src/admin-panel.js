@@ -389,27 +389,28 @@ export function renderTokenIssuedPage({ username, userId, rawToken }) {
 }
 
 /**
- * One copyable MCP client config block for a single granted subproject —
- * a read-only `<textarea>` (click-to-select-all, then Ctrl/Cmd+C) is the
- * closest zero-JS equivalent to a real "click to copy" button under this
- * app's CSP (`default-src 'none'`, no `script-src`) — the same
- * constraint already accepted for the password show/hide toggle.
- * @param {{ mcpUrl: string, rawToken: string, subproject: string }} options
+ * One copyable MCP client config block — a read-only `<textarea>`
+ * (click-to-select-all, then Ctrl/Cmd+C) is the closest zero-JS
+ * equivalent to a real "click to copy" button under this app's CSP
+ * (`default-src 'none'`, no `script-src`) — the same constraint already
+ * accepted for the password show/hide toggle.
+ *
+ * `subproject: null` renders the account's own PRIVATE default project
+ * (engram-shared-projects: omitting `X-Engram-Subproject` entirely is
+ * what makes engram-router fall back to the identity-scoped default, no
+ * grant required) — a non-null value renders one granted SHARED project,
+ * with the header set to that exact bare name.
+ * @param {{ mcpUrl: string, rawToken: string, subproject: string | null }} options
  * @returns {string}
  */
 function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
-  const config = {
-    'engram-remote-mcp': {
-      type: 'http',
-      url: mcpUrl,
-      headers: {
-        Authorization: `Bearer ${rawToken}`,
-        'X-Engram-Subproject': subproject,
-      },
-    },
-  };
+  const headers = { Authorization: `Bearer ${rawToken}` };
+  if (subproject) {
+    headers['X-Engram-Subproject'] = subproject;
+  }
+  const config = { 'engram-remote-mcp': { type: 'http', url: mcpUrl, headers } };
   return `<div class="mcp">
-  <h2>${escapeHtml(subproject)}</h2>
+  <h2>${escapeHtml(subproject ?? 'Default (private)')}</h2>
   <textarea readonly rows="8">${escapeHtml(JSON.stringify(config, null, 2))}</textarea>
 </div>`;
 }
@@ -439,11 +440,14 @@ function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
  */
 export function renderProfilePage({ target, viewer, subprojects, rawToken, tokenMeta, mcpUrl, csrfToken }) {
   const configBlocks = rawToken
-    ? subprojects.map((subproject) => renderMcpConfigBlock({ mcpUrl, rawToken, subproject })).join('\n')
+    ? [
+        renderMcpConfigBlock({ mcpUrl, rawToken, subproject: null }),
+        ...subprojects.map((subproject) => renderMcpConfigBlock({ mcpUrl, rawToken, subproject })),
+      ].join('\n')
     : '';
   const noGrantsNote =
     rawToken && subprojects.length === 0
-      ? '<p class="note">No Engram Cloud project grants yet — ask an admin, then reload this page.</p>'
+      ? '<p class="note">No shared Engram Cloud project grants yet — ask an admin for one. Your default (private) config above always works.</p>'
       : '';
   const existingTokenMarkup =
     !rawToken && tokenMeta

@@ -2440,6 +2440,18 @@ test('GET /admin/profile (self) on a SECOND visit does not re-issue a token or s
   assert.ok(body.includes('action="/admin/profile/regenerate-token"'));
 });
 
+test('GET /admin/profile (self, first visit, ZERO Engram Cloud grants) still shows the raw Bearer token via a default private config block, not just "No grants" text', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('profile-zero-grants', 'admin', 'p-profile-zero');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-zero/grants'] = { status: 200, body: [] };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Authorization'));
+  assert.ok(body.includes('Bearer '));
+  assert.ok(body.includes('Default'));
+});
+
 test('GET /admin/profile?userId=N is rejected for a member (own profile only)', async () => {
   const { cookie } = insertAdminAccountWithCloudLink('profile-member-3', 'member', 'p-profile-3');
   const res = await fetch(`${baseUrl}/admin/profile?userId=1`, {
