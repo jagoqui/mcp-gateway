@@ -668,6 +668,29 @@ test('GET /admin/users also lists admin-panel accounts with their role', async (
   assert.ok(body.includes('member'));
 });
 
+// User-requested (2026-09-18): the two separate tables this page used to
+// have (regular gateway users vs admin-panel accounts) were confusing —
+// merged into ONE table, admin-panel accounts also showing their linked
+// Cloud principal (or a clear "not linked" note) and a link to their own
+// Profile page instead of the regular /tokens page.
+test('GET /admin/users renders regular users and admin-panel accounts in the SAME table, admin accounts showing their Cloud principal', async () => {
+  const { cookie } = loginAsAdmin('unified-table-viewer');
+  insertUser({ username: 'unified-table-regular', isAdmin: false });
+  const memberId = insertUser({ username: 'unified-table-member', role: 'member' });
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (?, 'p-unified-1', 'irrelevant', datetime('now'))",
+  ).run(memberId);
+
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  // Exactly one <table> on the page — both kinds of rows share it.
+  assert.equal((body.match(/<table>/g) ?? []).length, 1);
+  assert.ok(body.includes('unified-table-regular'));
+  assert.ok(body.includes('unified-table-member'));
+  assert.ok(body.includes('p-unified-1'));
+  assert.ok(body.includes(`href="/admin/profile?userId=${memberId}"`));
+});
+
 // Found live (2026-09-16): POST /admin/logout has existed since Unit 7,
 // but no rendered page ever offered a way to trigger it, nor a way to
 // reach /dashboard or /monitor without leaving the admin panel first.

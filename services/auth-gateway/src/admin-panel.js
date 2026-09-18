@@ -126,48 +126,66 @@ function renderUserRow(user, csrfToken) {
 }
 
 /**
- * One row of the admin-panel accounts table — username, role, status.
- * `role`/`disabled_at` are server-sourced (listAdminAccounts), still
- * escaped (A12 precedent).
- * @param {{ username: string, role: string, disabled_at: string | null }} account
+ * One row of the admin-panel accounts (admin/member) portion of the
+ * unified users table — same 6-column shape `renderUserRow` uses, so
+ * both kinds sit in ONE `<table>` (user-requested, 2026-09-18: the two
+ * separate tables this page used to have were confusing — "admin panel
+ * accounts is the source of truth", one list). Role and Cloud-link
+ * status stand in for the "Active/Revoked tokens" columns (an admin
+ * account's own MCP token is managed on its own Profile page, not
+ * counted here); no Disable/Enable form yet for this kind of account —
+ * left blank rather than a dead-end action.
+ * @param {{ id: number, username: string, role: string, disabled_at: string | null }} account
+ * @param {string | null} cloudPrincipalId
  * @returns {string}
  */
-function renderAdminAccountRow(account) {
+function renderAdminAccountRow(account, cloudPrincipalId) {
   const status = account.disabled_at ? 'disabled' : 'active';
   return `<tr>
     <td>${escapeHtml(account.username)}</td>
-    <td>${escapeHtml(account.role)}</td>
-    <td><span class="badge">${status}</span></td>
+    <td><span class="badge">${status}</span> <span class="badge">${escapeHtml(account.role)}</span></td>
+    <td colspan="2">${cloudPrincipalId ? `Cloud: ${escapeHtml(cloudPrincipalId)}` : 'Not linked to Engram Cloud'}</td>
+    <td><a href="/admin/profile?userId=${account.id}">Profile</a></td>
+    <td></td>
   </tr>`;
 }
 
 /**
- * Renders the zero-JavaScript `/admin/users` page: the regular-user list
- * with a token-count summary, the create-user form, and (user-requested,
- * 2026-09-17) a read-only list of admin-panel accounts themselves
- * (admin/member, admin-identity-unification) with their role — previously
- * invisible anywhere in the UI. `isAdmin` is never a field on the
- * create-user form (design.md's Create a Regular User requirement) — the
- * handler that posts here forces is_admin=0 unconditionally, so there is
- * nothing here for a submitted body field to override even if one were
- * added.
+ * Renders the zero-JavaScript `/admin/users` page: ONE unified table (see
+ * `renderAdminAccountRow`'s own note) mixing regular gateway users
+ * (MCP-tool access, token counts) and admin-panel accounts (admin/member,
+ * Engram Cloud link) — previously two separate tables — plus the
+ * create-user form. `isAdmin` is never a field on that form (design.md's
+ * Create a Regular User requirement) — the handler that posts here
+ * forces is_admin=0 unconditionally, so there is nothing here for a
+ * submitted body field to override even if one were added.
  * @param {{
  *   users: Array<{ id: number, username: string, created_at: string, disabled_at: string | null, active_token_count: number, revoked_token_count: number }>,
  *   adminAccounts?: Array<{ id: number, username: string, role: string, created_at: string, disabled_at: string | null }>,
+ *   cloudLinksByUserId?: Map<number, string>,
  *   csrfToken: string,
  *   errorCode?: string | null,
  *   viewer: { username: string, role: string },
  * }} options
  * @returns {string}
  */
-export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCode, viewer }) {
+export function renderUsersPage({
+  users,
+  adminAccounts = [],
+  cloudLinksByUserId = new Map(),
+  csrfToken,
+  errorCode,
+  viewer,
+}) {
   const errorMessage =
     errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
       ? ADMIN_PANEL_ERRORS[errorCode]
       : null;
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
-  const rows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
-  const adminAccountRows = adminAccounts.map((account) => renderAdminAccountRow(account)).join('\n');
+  const regularRows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
+  const adminRows = adminAccounts
+    .map((account) => renderAdminAccountRow(account, cloudLinksByUserId.get(account.id) ?? null))
+    .join('\n');
   const body = `<main>
   ${renderAdminNav(csrfToken, viewer)}
   <h1>Users</h1>
@@ -178,7 +196,8 @@ export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCod
       <tr><th>Username</th><th>Status</th><th>Active tokens</th><th>Revoked tokens</th><th></th><th></th></tr>
     </thead>
     <tbody>
-      ${rows}
+      ${regularRows}
+      ${adminRows}
     </tbody>
   </table>
   </div>
@@ -190,18 +209,6 @@ export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCod
     <label>Confirm password <input type="password" name="passwordConfirm" required autocomplete="new-password"></label>
     <button type="submit">Create user</button>
   </form>
-  <h2>Admin panel accounts</h2>
-  <p class="note">Who can log into this panel, and with which role (Import from Engram Cloud, above, links each to a Cloud principal).</p>
-  <div class="table-wrap">
-  <table>
-    <thead>
-      <tr><th>Username</th><th>Role</th><th>Status</th></tr>
-    </thead>
-    <tbody>
-      ${adminAccountRows}
-    </tbody>
-  </table>
-  </div>
 </main>`;
   return renderDocument({ title: 'Admin — Users', body });
 }

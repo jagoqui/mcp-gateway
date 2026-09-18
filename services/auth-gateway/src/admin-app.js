@@ -509,6 +509,11 @@ function handleGetAdminUsers(req, res, db, url) {
 
   const users = listManagedUsers(db);
   const adminAccounts = listAdminAccounts(db);
+  const cloudLinksByUserId = new Map(
+    /** @type {any[]} */ (db.prepare('SELECT user_id, principal_id FROM engram_cloud_credentials').all()).map(
+      (row) => [row.user_id, row.principal_id],
+    ),
+  );
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   const errorCode = url.searchParams.get('error');
   res.writeHead(200, ADMIN_PAGE_HEADERS);
@@ -516,6 +521,7 @@ function handleGetAdminUsers(req, res, db, url) {
     renderUsersPage({
       users,
       adminAccounts,
+      cloudLinksByUserId,
       csrfToken,
       errorCode,
       viewer: { username: admin.username, role: admin.role },
