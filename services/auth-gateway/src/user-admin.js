@@ -499,3 +499,42 @@ export function regenerateToken(db, opts) {
   const { newTokenId } = runTransaction();
   return { rawToken, newTokenId };
 }
+
+/**
+ * revokeTokenById's audited counterpart for the mcp-profile-page's
+ * self-service Revoke action — generic across both roles, same reasoning
+ * as regenerateToken above: no is_admin-specific eligibility re-check here,
+ * since admin-app.js's handler already pre-checks eligibility via
+ * resolveProfileTarget (self for anyone, or a chosen userId for an admin
+ * only) before calling this. Deliberately NOT reusing revokeManagedToken,
+ * which re-checks via getManagedUser (is_admin=0 only) and would wrongly
+ * reject an admin-panel account (is_admin=1) as a target. Named distinctly
+ * from the pre-existing CLI-only revokeToken(db, {token}) above (bin/admin.js,
+ * looks up by raw token value, unrelated shape).
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ tokenId: number, userId: number, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {boolean}
+ */
+export function revokeProfileToken(db, opts) {
+  const { tokenId, userId, actorUserId, actorLabel } = opts;
+  const runTransaction = db.transaction(() => {
+    const result = db
+      .prepare(
+        `UPDATE tokens SET revoked_at = datetime('now') WHERE id = ? AND ${OWNED_ACTIVE_TOKEN_PREDICATE}`,
+      )
+      .run(tokenId, userId);
+    if (result.changes === 0) {
+      return false;
+    }
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'token.revoke',
+      outcome: 'success',
+      targetUserId: userId,
+      targetTokenId: tokenId,
+    });
+    return true;
+  });
+  return runTransaction();
+}

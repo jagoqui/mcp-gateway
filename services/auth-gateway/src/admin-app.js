@@ -33,6 +33,7 @@ import {
   issueManagedToken,
   revokeManagedToken,
   regenerateToken,
+  revokeProfileToken,
   importEngramCloudPrincipal,
 } from './user-admin.js';
 import {
@@ -1682,6 +1683,28 @@ async function handleGetAdminProfile(req, res, db, url, config) {
     return;
   }
 
+  await sendProfilePage(res, db, admin, target, config);
+}
+
+/**
+ * Shared rendering for both GET /admin/profile and the success path of
+ * POST /admin/profile/regenerate-token — D11, not a second implementation.
+ * `forcedRawToken`, when given (the regenerate handler's freshly minted
+ * value), is trusted as-is and shown directly; otherwise this auto-issues
+ * a token the first time a target has none, same lazy pattern as
+ * `ensureEngramCloudLink`. Either way it's a single 200 render, never a
+ * redirect — a redirect would land on a later GET where the raw value no
+ * longer exists anywhere (tokens are hashed at rest, D10), showing the
+ * viewer nothing to copy. This is exactly the live bug reported
+ * 2026-09-18: regenerate used to redirect and silently lose the new value.
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ id: number, username: string, role: string }} admin
+ * @param {{ id: number, username: string, role: string }} target
+ * @param {{ domain: string }} config
+ * @param {string | null} [forcedRawToken]
+ */
+async function sendProfilePage(res, db, admin, target, config, forcedRawToken = null) {
   // Self-heal the Cloud link exactly like the SSO route does (D2:
   // swallowed — a Cloud outage must never break this page, just show an
   // empty grants list).
@@ -1710,18 +1733,25 @@ async function handleGetAdminProfile(req, res, db, url, config) {
     }
   }
 
-  const existingTokens = listTokensForUser(db, target.id);
-  const activeToken = existingTokens.find((/** @type {any} */ t) => !t.revoked_at);
-
-  let rawToken = null;
-  let tokenMeta = activeToken ?? null;
-  if (!activeToken) {
-    const issued = issueMcpToken(db, { userId: target.id, label: 'mcp-profile' });
-    rawToken = issued.rawToken;
+  let rawToken = forcedRawToken;
+  let tokenMeta;
+  if (rawToken) {
+    // The caller (regenerate) just revoked the old one and inserted this
+    // new one inside its own transaction — the active row IS this token.
     tokenMeta = listTokensForUser(db, target.id).find((/** @type {any} */ t) => !t.revoked_at);
+  } else {
+    const existingTokens = listTokensForUser(db, target.id);
+    const activeToken = existingTokens.find((/** @type {any} */ t) => !t.revoked_at);
+    if (activeToken) {
+      tokenMeta = activeToken;
+    } else {
+      const issued = issueMcpToken(db, { userId: target.id, label: 'mcp-profile' });
+      rawToken = issued.rawToken;
+      tokenMeta = listTokensForUser(db, target.id).find((/** @type {any} */ t) => !t.revoked_at);
+    }
   }
 
-  const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
+  const csrfToken = issueAdminCsrfToken(admin.id, getAdminSessionSecret());
   res.writeHead(200, ADMIN_PAGE_HEADERS);
   res.end(
     renderProfilePage({
@@ -1741,6 +1771,13 @@ async function handleGetAdminProfile(req, res, db, url, config) {
  * admin write guard, then `regenerateToken` (already existed, D8) scoped
  * to self for anyone, or a chosen `userId` for an admin only. Reachable
  * by both roles, same as the GET route above.
+ *
+ * The success path renders the profile page DIRECTLY via `sendProfilePage`
+ * (200, form clients) or returns `rawToken` inline (JSON clients) — never a
+ * redirect (D10, same convention as `handlePostAdminTokensRegenerate`).
+ * Fixed 2026-09-18: this used to redirect to GET /admin/profile, which by
+ * then already sees an active token and never shows a raw value again —
+ * the regenerated token was minted but never actually shown to the user.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('better-sqlite3').Database} db
@@ -1790,14 +1827,94 @@ async function handlePostAdminProfileRegenerateToken(req, res, db, config) {
   const redirectTarget =
     target.id === admin.id ? '/admin/profile' : `/admin/profile?userId=${target.id}`;
 
+  /** @type {{ rawToken: string, newTokenId: number }} */
+  let result;
   try {
-    regenerateToken(db, {
+    result = regenerateToken(db, {
       tokenId: Number(tokenId),
       userId: target.id,
       actorUserId: admin.id,
       actorLabel: admin.username,
     });
   } catch {
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  if (isForm) {
+    await sendProfilePage(res, db, admin, target, config, result.rawToken);
+    return;
+  }
+  sendJson(res, 200, { ok: true, rawToken: result.rawToken });
+}
+
+/**
+ * POST /admin/profile/revoke-token (mcp-profile-page) — member self-service:
+ * "quitar" the current token without issuing a replacement, leaving the
+ * profile with no active token until the next visit auto-issues a fresh
+ * one (same lazy pattern as the first-visit issue in GET /admin/profile).
+ * Same write guard + `resolveProfileTarget` eligibility as regenerate above.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminProfileRevokeToken(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  const { tokenId, userId } = data ?? {};
+  const target = resolveProfileTarget(res, admin, userId !== undefined ? String(userId) : null, db);
+  if (!target) {
+    return;
+  }
+
+  const redirectTarget =
+    target.id === admin.id ? '/admin/profile' : `/admin/profile?userId=${target.id}`;
+
+  const revoked = revokeProfileToken(db, {
+    tokenId: Number(tokenId),
+    userId: target.id,
+    actorUserId: admin.id,
+    actorLabel: admin.username,
+  });
+  if (!revoked) {
     if (isForm) {
       res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
       res.end();
@@ -1912,6 +2029,11 @@ export async function handleAdminRequest(req, res, db, config) {
   if (req.method === 'GET' && pathname === '/admin/profile') {
     await handleGetAdminProfile(req, res, db, url, config);
     return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/profile/revoke-token') {
+    await handlePostAdminProfileRevokeToken(req, res, db, config);
+    return;
   }
 
   if (req.method === 'POST' && pathname === '/admin/profile/regenerate-token') {

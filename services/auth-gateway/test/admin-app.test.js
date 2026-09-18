@@ -2459,9 +2459,12 @@ test('GET /admin/profile?userId=N works for an admin viewing another admin-panel
   assert.ok(body.includes('profile-member-4'));
 });
 
-test('POST /admin/profile/regenerate-token (self) issues a new token and revokes the old one', async () => {
+test('POST /admin/profile/regenerate-token (self) issues a new token, revokes the old one, and shows the fresh raw value DIRECTLY (D10, no redirect that would lose it)', async () => {
   const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-5', 'member', 'p-profile-5');
-  engramCloudResponsesByRoute['GET /admin/users/p-profile-5/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-5/grants'] = {
+    status: 200,
+    body: [{ principal_id: 'p-profile-5', project: 'demo-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' }],
+  };
   await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
   const oldToken = /** @type {any} */ (
     db.prepare('SELECT id FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
@@ -2478,7 +2481,11 @@ test('POST /admin/profile/regenerate-token (self) issues a new token and revokes
     body: new URLSearchParams({ tokenId: String(oldToken.id), csrf }),
     redirect: 'manual',
   });
-  assert.equal(res.status, 302);
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('demo-project'));
+  assert.ok(body.includes('Authorization'));
+  assert.ok(body.includes('Copy this now'));
 
   const oldRow = /** @type {any} */ (db.prepare('SELECT revoked_at FROM tokens WHERE id = ?').get(oldToken.id));
   assert.ok(oldRow.revoked_at);
@@ -2503,6 +2510,79 @@ test('POST /admin/profile/regenerate-token with a userId for another account is 
     body: new URLSearchParams({ tokenId: '1', userId: String(otherId), csrf }),
   });
   assert.equal(res.status, 403);
+});
+
+test('POST /admin/profile/revoke-token (self) revokes the active token and leaves none active', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-8', 'member', 'p-profile-8');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-8/grants'] = { status: 200, body: [] };
+  await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const activeToken = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
+  );
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/revoke-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: String(activeToken.id), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+
+  const activeCount = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
+  ).n;
+  assert.equal(activeCount, 0);
+});
+
+test('POST /admin/profile/revoke-token with a userId for another account is rejected for a member', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-9', 'member', 'p-profile-9');
+  const { userId: otherId } = insertAdminAccountWithCloudLink('profile-member-10', 'member', 'p-profile-10');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/revoke-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: '1', userId: String(otherId), csrf }),
+  });
+  assert.equal(res.status, 403);
+});
+
+test('POST /admin/profile/revoke-token works for an admin revoking another admin-panel account\'s token', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-admin-revoker');
+  const { userId: targetId } = insertAdminAccountWithCloudLink('profile-member-11', 'member', 'p-profile-11');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-11/grants'] = { status: 200, body: [] };
+  await fetch(`${baseUrl}/admin/profile?userId=${targetId}`, { headers: { Cookie: adminCookie } });
+  const activeToken = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(targetId)
+  );
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('profile-admin-revoker')).id;
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/revoke-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: String(activeToken.id), userId: String(targetId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+
+  const activeCount = /** @type {any} */ (
+    db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(targetId)
+  ).n;
+  assert.equal(activeCount, 0);
 });
 
 // engram-shared-projects — GET /internal/engram-grant: service-to-service

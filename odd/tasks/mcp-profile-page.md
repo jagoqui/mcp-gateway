@@ -37,6 +37,11 @@ In scope:
 - `POST /admin/profile/regenerate-token` — self for a member, or a
   chosen `userId` for an admin. Reuses `regenerateToken` (already
   exists, `user-admin.js`).
+- `POST /admin/profile/revoke-token` — same eligibility rule as
+  regenerate; lets a member "quitar" (revoke) their own token without
+  issuing a replacement, added 2026-09-18 after the user asked for
+  member self-service control over their own MCP access, not just
+  copy/regenerate.
 - Nav links: "Profile" in `renderAdminNav` (admin) and in
   `renderConsolePage`'s header (member — currently the only page they
   can reach).
@@ -72,11 +77,13 @@ Out of scope (explicitly, from the exploration/decision conversation):
 - [x] 4. RED/GREEN: `GET /admin/profile?userId=N` — 403 for a member (own profile only); works for an admin, viewing another account's grants/token state.
 - [x] 5. RED/GREEN: `POST /admin/profile/regenerate-token` — self (member or admin) always allowed; `userId` for another account admin-only; full 5-step write guard (Origin/CSRF); re-enters the "just issued" state with a fresh raw value.
 - [x] 6. Nav: "Profile" link added to `renderAdminNav` and to `renderConsolePage`'s header (member-reachable).
-- [ ] 7. Manual E2E on the VPS: real admin and a real member each see their own correct grants/config; admin can view a member's profile; regenerate produces a working new token (old one stops working).
+- [x] 7a. RED/GREEN `test/admin-app.test.js`: `POST /admin/profile/revoke-token` — self (member) revokes the active token, leaves none active; `userId` for another account rejected for a member (403); works for an admin revoking a target account's token. New `revokeProfileToken` (`user-admin.js`, D8 audited, generic across roles like `regenerateToken` — deliberately NOT reusing `revokeManagedToken`, which re-checks `getManagedUser`/is_admin=0 only and would wrongly reject an admin-panel account target; also named distinctly from the pre-existing CLI-only `revokeToken(db, {token})`). Added a "Revoke" button next to "Regenerate" in `renderProfilePage`'s existing-token markup. 3 new tests.
+- [x] 7b. BUG FIX (reported live by the user 2026-09-18: "solo veo regenerar pero no me muestra nada"): `POST /admin/profile/regenerate-token`'s success path used to discard `regenerateToken`'s returned `rawToken` and 302-redirect to `GET /admin/profile` — which by then already sees an active token and never shows a raw value again (D10, hashed at rest). The freshly regenerated token was minted but the user could never see/copy it. Fixed by extracting `sendProfilePage` (shared by GET and the regenerate success path) and rendering it DIRECTLY (200) with the fresh `rawToken`, matching the established convention already used by `handlePostAdminTokensRegenerate` for regular users. RED/GREEN: updated the existing regenerate-token test to assert 200 + the raw config body, instead of 302. 145/145 admin-app tests, 405/405 full suite, lint clean.
+- [ ] 7. Manual E2E on the VPS: real admin and a real member each see their own correct grants/config; admin can view a member's profile; regenerate produces a working new token (old one stops working) AND SHOWS it; member can revoke their own token.
 
 Also added along the way: `getAdminAccount` (user-admin.js, the admin/member mirror of `getManagedUser`) to resolve `?userId=` safely.
 
-Full suite: 397/397 `node --test` passing (up from 386), lint clean.
+Full suite: 405/405 `node --test` passing (auth-gateway), lint clean.
 
 ## Progress Notes
 

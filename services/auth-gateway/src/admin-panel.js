@@ -462,6 +462,12 @@ export function renderProfilePage({ target, viewer, subprojects, rawToken, token
       <input type="hidden" name="userId" value="${target.id}">
       <button type="submit">Regenerate</button>
     </form>
+    <form method="post" action="/admin/profile/revoke-token">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <input type="hidden" name="tokenId" value="${tokenMeta.id}">
+      <input type="hidden" name="userId" value="${target.id}">
+      <button type="submit">Revoke</button>
+    </form>
   </div>`
       : '';
   const body = `<main>
