@@ -310,6 +310,34 @@ test('authenticateWithMethod returns { user, method: "bearer" } for a valid Bear
   assert.equal(result.user.id, userId);
 });
 
+test('a valid Bearer token bumps that exact token\'s last_used_at (found live 2026-09-18: the profile page always showed "never", even for actively-used tokens — nothing ever wrote to this column)', () => {
+  const userId = insertUser({ username: 'noah' });
+  insertToken(userId, 'noahs-token');
+  const before = /** @type {any} */ (
+    db.prepare('SELECT last_used_at FROM tokens WHERE user_id = ?').get(userId)
+  );
+  assert.equal(before.last_used_at, null);
+
+  authenticateWithMethod(db, { authorization: 'Bearer noahs-token' }, SESSION_SECRET);
+
+  const after = /** @type {any} */ (
+    db.prepare('SELECT last_used_at FROM tokens WHERE user_id = ?').get(userId)
+  );
+  assert.ok(after.last_used_at, 'last_used_at must be set after a successful Bearer auth');
+});
+
+test('an invalid/revoked Bearer token never touches last_used_at', () => {
+  const userId = insertUser({ username: 'olivia' });
+  insertToken(userId, 'olivias-token', { revoked: true });
+
+  authenticateWithMethod(db, { authorization: 'Bearer olivias-token' }, SESSION_SECRET);
+
+  const row = /** @type {any} */ (
+    db.prepare('SELECT last_used_at FROM tokens WHERE user_id = ?').get(userId)
+  );
+  assert.equal(row.last_used_at, null);
+});
+
 test('authenticateWithMethod returns { user, method: "cookie" } for a valid session cookie', () => {
   const userId = insertUser({ username: 'maya' });
   const token = createSessionToken({ uid: userId }, SESSION_SECRET);

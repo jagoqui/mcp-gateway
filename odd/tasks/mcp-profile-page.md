@@ -98,7 +98,9 @@ Out of scope (explicitly, from the exploration/decision conversation):
 
 Also added along the way: `getAdminAccount` (user-admin.js, the admin/member mirror of `getManagedUser`) to resolve `?userId=` safely.
 
-Full suite: 431/431 `node --test` passing (auth-gateway), lint clean.
+- [x] 10. BUG FIX (reported live 2026-09-18: "los gateway token aparecen sin uso"): the Gateway tokens table's "Last used" column always showed "never", even for a token being actively used every time an MCP client authenticated — because `authenticateBearer` (verify.js) never wrote to `tokens.last_used_at` anywhere in the codebase; the column existed and was rendered, but nothing ever updated it. Fixed with a single `UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?` right after a successful Bearer authentication (never for an invalid/revoked/disabled attempt). This runs on every proxied MCP request (the same hot path `/verify` already documents as performance-sensitive) — a single indexed UPDATE by primary key, no new query added to the read path. 2 new tests in `test/verify.test.js` (bumps on success, untouched on a revoked/invalid attempt). 439/439 full suite, lint clean.
+
+Full suite: 439/439 `node --test` passing (auth-gateway), lint clean.
 
 ## Progress Notes
 

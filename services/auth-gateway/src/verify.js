@@ -75,6 +75,11 @@ function authenticateBearer(db, authorizationHeader) {
   if (!user || user.disabled_at) {
     return null;
   }
+  // Found live 2026-09-18: this column existed and was rendered on the
+  // profile/tokens pages, but nothing ever wrote to it — every token
+  // showed "never" regardless of actual use. Runs only on a successful
+  // authentication (never for an invalid/revoked/disabled attempt).
+  db.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?").run(row.id);
   return user;
 }
 
