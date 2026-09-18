@@ -404,3 +404,120 @@ test('a private request (isShared omitted or false) never calls checkGrant at al
   const result = await pm.getOrCreateChild('jagoqui');
   assert.equal(typeof result.port, 'number');
 });
+
+// engram-contributor-attribution — a cold spawn tries fetchIdentityToken
+// once (when an identity is known) and uses its result for
+// ENGRAM_CLOUD_TOKEN when non-null, falling back to the shared cloudToken
+// exactly as before this feature otherwise. Unlike checkGrant, a missing/
+// unconfigured fetchIdentityToken must NEVER throw or block a spawn —
+// only degrade attribution.
+
+test('a cold spawn with a resolved identity token uses it for ENGRAM_CLOUD_TOKEN instead of the shared one', async () => {
+  const { spawnChild, calls } = makeStubSpawner();
+  const fetchIdentityToken = async () => 'yenny-own-cloud-token';
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 'legacy-token',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    waitUntilReady: noWait,
+    fetchIdentityToken,
+  });
+
+  await pm.getOrCreateChild('yenny', { identity: 'yenny' });
+
+  assert.equal(calls[0].env.ENGRAM_CLOUD_TOKEN, 'yenny-own-cloud-token');
+});
+
+test('a cold spawn falls back to the shared cloudToken when fetchIdentityToken resolves null', async () => {
+  const { spawnChild, calls } = makeStubSpawner();
+  const fetchIdentityToken = async () => null;
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 'legacy-token',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    waitUntilReady: noWait,
+    fetchIdentityToken,
+  });
+
+  await pm.getOrCreateChild('yenny', { identity: 'yenny' });
+
+  assert.equal(calls[0].env.ENGRAM_CLOUD_TOKEN, 'legacy-token');
+});
+
+test('an unconfigured fetchIdentityToken behaves exactly like before this feature: always the shared cloudToken, never throws', async () => {
+  const { spawnChild, calls } = makeStubSpawner();
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 'legacy-token',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    waitUntilReady: noWait,
+    // No fetchIdentityToken injected at all.
+  });
+
+  const result = await pm.getOrCreateChild('jagoqui', { identity: 'jagoqui' });
+
+  assert.equal(typeof result.port, 'number');
+  assert.equal(calls[0].env.ENGRAM_CLOUD_TOKEN, 'legacy-token');
+});
+
+test('fetchIdentityToken is called exactly once per cold spawn, never again on a warm cache hit', async () => {
+  const { spawnChild } = makeStubSpawner();
+  let fetchCallCount = 0;
+  const fetchIdentityToken = async () => {
+    fetchCallCount += 1;
+    return 'yenny-own-cloud-token';
+  };
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 'legacy-token',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    waitUntilReady: noWait,
+    fetchIdentityToken,
+  });
+
+  await pm.getOrCreateChild('yenny', { identity: 'yenny' });
+  await pm.getOrCreateChild('yenny', { identity: 'yenny' });
+
+  assert.equal(fetchCallCount, 1);
+});
+
+test('a request with no identity in meta never calls fetchIdentityToken and uses the shared cloudToken', async () => {
+  const { spawnChild, calls } = makeStubSpawner();
+  let fetchCalled = false;
+  const fetchIdentityToken = async () => {
+    fetchCalled = true;
+    return 'should-never-be-used';
+  };
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 'legacy-token',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    waitUntilReady: noWait,
+    fetchIdentityToken,
+  });
+
+  await pm.getOrCreateChild('jagoqui');
+
+  assert.equal(fetchCalled, false);
+  assert.equal(calls[0].env.ENGRAM_CLOUD_TOKEN, 'legacy-token');
+});

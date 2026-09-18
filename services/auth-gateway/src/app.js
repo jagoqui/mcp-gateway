@@ -5,7 +5,7 @@ import { handleAdminRequest } from './admin-app.js';
 import { decideVerify, authenticate, authenticateWithMethod, wantsHtml } from './verify.js';
 import { getSessionSecret, createSessionToken, serializeSessionCookie } from './session.js';
 import { verifyPassword } from './tokens.js';
-import { encrypt } from './crypto.js';
+import { encrypt, decrypt } from './crypto.js';
 import { buildCredentialStatus } from './credential-status.js';
 import { verifyCsrfToken, issueCsrfToken, isAcceptableOrigin } from './csrf.js';
 import { PAGE_HEADERS } from './html.js';
@@ -639,6 +639,72 @@ async function handleInternalEngramGrant(req, res, db, url) {
 }
 
 /**
+ * Resolves `identity` (a `users.username`) to its own DECRYPTED Engram
+ * Cloud token (engram-contributor-attribution) — pure local lookup, never
+ * calls out to Cloud. `null` on every "cannot determine" case: unknown
+ * identity, no linked Cloud principal, or a corrupt/undecryptable
+ * ciphertext — this is an attribution nicety, not a security boundary, so
+ * failing closed here means "fall back to the shared token" for the
+ * caller (engram-router), never "block access".
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ identity: string }} opts
+ * @returns {Promise<string | null>}
+ */
+function resolveIdentityToken(db, { identity }) {
+  const user = /** @type {any} */ (
+    db.prepare('SELECT id FROM users WHERE username = ?').get(identity)
+  );
+  if (!user) {
+    return null;
+  }
+  const link = /** @type {any} */ (
+    db.prepare('SELECT ciphertext FROM engram_cloud_credentials WHERE user_id = ?').get(user.id)
+  );
+  if (!link) {
+    return null;
+  }
+  try {
+    return decrypt(link.ciphertext);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /internal/engram-cloud-token?identity= (engram-contributor-
+ * attribution) — service-to-service only, same shape/trust boundary as
+ * `/internal/engram-grant` right above (shared-secret gated, never routed
+ * through Caddy). Used once by engram-router's cold spawn path so a
+ * spawned child authenticates to Cloud with ITS identity's own managed
+ * principal token instead of the shared legacy wildcard token — Cloud's
+ * own Contributors tab derives `createdBy` from whichever token a sync
+ * process authenticated with (confirmed via deepwiki, see
+ * odd/tasks/engram-contributor-attribution.md), so the shared token
+ * always showed up as a generic "LEGACY_SYNC" contributor instead of the
+ * real identity.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {URL} url
+ */
+async function handleInternalEngramCloudToken(req, res, db, url) {
+  const secret = process.env.ENGRAM_ROUTER_INTERNAL_SECRET;
+  if (!secret || req.headers['x-internal-secret'] !== secret) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const identity = url.searchParams.get('identity');
+  if (!identity) {
+    sendJson(res, 400, { error: 'invalid_request' });
+    return;
+  }
+
+  const token = resolveIdentityToken(db, { identity });
+  sendJson(res, 200, { token });
+}
+
+/**
  * Runs an async route handler, converting any uncaught rejection into a
  * generic 500 response instead of letting it crash the process. Shared by
  * every POST route so each handler only needs to worry about its own
@@ -722,6 +788,11 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'GET' && pathname === '/internal/engram-grant') {
       runAsyncHandler(handleInternalEngramGrant(req, res, db, url), res);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/internal/engram-cloud-token') {
+      runAsyncHandler(handleInternalEngramCloudToken(req, res, db, url), res);
       return;
     }
 

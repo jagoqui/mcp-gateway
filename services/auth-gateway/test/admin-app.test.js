@@ -7,6 +7,7 @@ import { createAdminSessionToken } from '../src/admin-session.js';
 import { createSessionToken } from '../src/session.js';
 import { issueAdminCsrfToken } from '../src/csrf.js';
 import { ADMIN_LOGIN_MAX_ATTEMPTS } from '../src/admin-throttle.js';
+import { encrypt } from '../src/crypto.js';
 import http from 'node:http';
 
 const DOMAIN = 'test.example';
@@ -3078,4 +3079,64 @@ test('GET /internal/engram-grant returns granted:false (fail closed) for an unkn
     { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
   );
   assert.equal((/** @type {any} */ (await cloudDown.json())).granted, false);
+});
+
+// engram-contributor-attribution — GET /internal/engram-cloud-token: same
+// service-to-service shape as /internal/engram-grant, but resolves an
+// identity's own DECRYPTED Cloud token (pure local DB, never calls out to
+// Cloud) — engram-router's cold spawn path uses it so each spawned child
+// authenticates with ITS identity's own token instead of the shared
+// legacy one, fixing Cloud's Contributors tab attribution.
+
+test('GET /internal/engram-cloud-token with no/wrong secret returns 401', async () => {
+  const res1 = await fetch(`${baseUrl}/internal/engram-cloud-token?identity=x`);
+  assert.equal(res1.status, 401);
+  const res2 = await fetch(`${baseUrl}/internal/engram-cloud-token?identity=x`, {
+    headers: { 'X-Internal-Secret': 'wrong-secret' },
+  });
+  assert.equal(res2.status, 401);
+});
+
+test('GET /internal/engram-cloud-token with no identity param returns 400', async () => {
+  const res = await fetch(`${baseUrl}/internal/engram-cloud-token`, {
+    headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+  });
+  assert.equal(res.status, 400);
+});
+
+test('GET /internal/engram-cloud-token returns the decrypted token for a real linked identity', async () => {
+  const userId = insertUser({ username: 'cloud-token-identity-1', role: 'admin' });
+  db.prepare(
+    "INSERT INTO engram_cloud_credentials (user_id, principal_id, ciphertext, updated_at) VALUES (?, ?, ?, datetime('now'))",
+  ).run(userId, 'p-cloud-token-1', encrypt('real-raw-cloud-token-value'));
+
+  const res = await fetch(
+    `${baseUrl}/internal/engram-cloud-token?identity=cloud-token-identity-1`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal(res.status, 200);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.token, 'real-raw-cloud-token-value');
+});
+
+test('GET /internal/engram-cloud-token returns token:null for an unknown identity', async () => {
+  const res = await fetch(
+    `${baseUrl}/internal/engram-cloud-token?identity=no-such-user`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal(res.status, 200);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.token, null);
+});
+
+test('GET /internal/engram-cloud-token returns token:null for a known identity with no Cloud link', async () => {
+  insertUser({ username: 'cloud-token-no-link', role: 'admin' });
+
+  const res = await fetch(
+    `${baseUrl}/internal/engram-cloud-token?identity=cloud-token-no-link`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal(res.status, 200);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.token, null);
 });

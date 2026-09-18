@@ -141,12 +141,28 @@ async function unconfiguredCheckGrant() {
 }
 
 /**
+ * Default fetchIdentityToken — deliberately the OPPOSITE philosophy from
+ * unconfiguredCheckGrant above: checkGrant is a security boundary (an
+ * unconfigured shared path must fail LOUD), while per-identity Cloud
+ * token attribution (engram-contributor-attribution) is a nicety on top
+ * of already-working access — a missing/unconfigured fetchIdentityToken
+ * must NEVER throw or block a spawn, only silently fall back to the
+ * shared `cloudToken` exactly as this codebase always behaved before
+ * this feature existed.
+ * @returns {Promise<null>}
+ */
+async function defaultFetchIdentityToken() {
+  return null;
+}
+
+/**
  * @param {{
  *   maxChildren: number,
  *   portAllocatorOptions: { base: number, max: number },
  *   cloudToken: string,
  *   cloudServer: string,
  *   checkGrant?: (opts: { identity: string, project: string }) => Promise<boolean>,
+ *   fetchIdentityToken?: (opts: { identity: string }) => Promise<string | null>,
  *   spawnChild?: (opts: { identity: string, port: number, env: Record<string, string> }) => any,
  *   enrollProject?: (opts: { project: string, env: Record<string, string> }) => Promise<void>,
  *   waitUntilReady?: (port: number, options?: { timeoutMs?: number, intervalMs?: number }) => Promise<void>,
@@ -160,6 +176,7 @@ export function createProcessManager({
   cloudToken,
   cloudServer,
   checkGrant = unconfiguredCheckGrant,
+  fetchIdentityToken = defaultFetchIdentityToken,
   spawnChild = realSpawnChild,
   enrollProject = realEnrollProject,
   waitUntilReady: waitForReady = waitUntilReady,
@@ -170,18 +187,27 @@ export function createProcessManager({
   /** @type {Map<string, { child: any, port: number }>} */
   const children = new Map();
 
-  function buildEnv(project) {
+  /**
+   * `identityTokenOverride`, when non-null (engram-contributor-
+   * attribution), is used for ENGRAM_CLOUD_TOKEN instead of the shared
+   * `cloudToken` — this identity's own managed principal token, so
+   * Cloud's Contributors tab attributes writes to them instead of a
+   * generic "LEGACY_SYNC".
+   * @param {string} project
+   * @param {string | null} [identityTokenOverride]
+   */
+  function buildEnv(project, identityTokenOverride = null) {
     return {
       ENGRAM_PROJECT: project,
       ENGRAM_CLOUD_AUTOSYNC: '1',
-      ENGRAM_CLOUD_TOKEN: cloudToken,
+      ENGRAM_CLOUD_TOKEN: identityTokenOverride ?? cloudToken,
       ENGRAM_CLOUD_SERVER: cloudServer,
     };
   }
 
   /**
    * @param {string} project
-   * @param {{ identity?: string, isShared?: boolean }} [meta] engram-shared-projects: `identity` and `isShared` are only ever read when `isShared` is true (the grant-check path) — a private request needs neither.
+   * @param {{ identity?: string, isShared?: boolean }} [meta] engram-shared-projects: `isShared` is only ever read when true (the grant-check path) — a private request needs it only implicitly. `identity`, when present, is ALSO used (engram-contributor-attribution) on the cold path to fetch that identity's own Cloud token — private and shared requests alike.
    * @returns {Promise<{ port: number }>}
    */
   async function getOrCreateChild(project, meta = {}) {
@@ -215,7 +241,14 @@ export function createProcessManager({
       throw new Error('engram-router: at capacity (port range exhausted)');
     }
 
-    const env = buildEnv(project);
+    // Identity-token lookup ONCE, on this cold path only — same "no
+    // per-request network round-trip" philosophy as the grant check
+    // above (engram-contributor-attribution). `null` (no identity in
+    // meta, or the fetch itself resolved null) falls back to the shared
+    // `cloudToken`, exactly as buildEnv always behaved before this
+    // feature.
+    const identityToken = identity ? await fetchIdentityToken({ identity }) : null;
+    const env = buildEnv(project, identityToken);
     try {
       await enrollProject({ project, env });
     } catch (err) {

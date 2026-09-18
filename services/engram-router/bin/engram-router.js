@@ -1,6 +1,6 @@
 import { createServer } from '../src/app.js';
 import { createProcessManager } from '../src/process-manager.js';
-import { createGrantChecker } from '../src/grant-client.js';
+import { createGrantChecker, createIdentityTokenFetcher } from '../src/grant-client.js';
 
 const DEFAULT_PORT = 9000;
 const DEFAULT_PORT_BASE = 19100;
@@ -36,6 +36,15 @@ function main() {
     // (isShared: true) request must never be reachable with grant
     // checking unconfigured.
     checkGrant: createGrantChecker({
+      baseUrl: process.env.AUTH_GATEWAY_INTERNAL_URL || DEFAULT_AUTH_GATEWAY_INTERNAL_URL,
+      secret: requiredEnv('ENGRAM_ROUTER_INTERNAL_SECRET'),
+    }),
+    // engram-contributor-attribution: same secret/base URL as checkGrant
+    // above, no new env var — unlike checkGrant this is safe to leave
+    // unconfigured (defaultFetchIdentityToken just falls back to the
+    // shared cloudToken), but there's no reason not to wire it whenever
+    // the same internal secret already exists.
+    fetchIdentityToken: createIdentityTokenFetcher({
       baseUrl: process.env.AUTH_GATEWAY_INTERNAL_URL || DEFAULT_AUTH_GATEWAY_INTERNAL_URL,
       secret: requiredEnv('ENGRAM_ROUTER_INTERNAL_SECRET'),
     }),
