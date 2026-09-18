@@ -47,6 +47,13 @@ function handleVerify(req, res, db, config) {
         cookie: req.headers.cookie,
         accept: req.headers.accept,
         forwardedUri: /** @type {string | undefined} */ (req.headers['x-forwarded-uri']),
+        // cloud-first-identity-and-passwords: forwarded through to
+        // authenticateBearer so it can record which project a Bearer
+        // token was last used against (last_used_project) — observational
+        // only, never read for any authorization decision here.
+        'x-engram-subproject': /** @type {string | undefined} */ (
+          req.headers['x-engram-subproject']
+        ),
       },
       config,
     );

@@ -67,6 +67,55 @@ test('tokens.token_hash enforces a UNIQUE constraint', () => {
   db.close();
 });
 
+test('tokens has a last_used_project column, nullable, defaulting to NULL', () => {
+  const db = openDb(':memory:');
+  db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('ivan', 'hash');
+  db.prepare('INSERT INTO tokens (user_id, token_hash) VALUES (1, ?)').run('ivan-token-hash');
+  const row = /** @type {any} */ (
+    db.prepare('SELECT last_used_project FROM tokens WHERE user_id = ?').get(1)
+  );
+  assert.equal(row.last_used_project, null);
+  db.close();
+});
+
+test('applySchema migrates a pre-existing tokens table (created before last_used_project existed) by adding the column', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'member')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT
+    );
+    CREATE TABLE tokens (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      label TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT,
+      revoked_at TEXT
+    );
+  `);
+  db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('judy', 'hash');
+  db.prepare('INSERT INTO tokens (user_id, token_hash) VALUES (1, ?)').run('judy-token-hash');
+
+  applySchema(db);
+
+  const columns = /** @type {{ name: string }[]} */ (db.prepare('PRAGMA table_info(tokens)').all()).map(
+    (c) => c.name,
+  );
+  assert.ok(columns.includes('last_used_project'));
+  const row = /** @type {any} */ (
+    db.prepare('SELECT last_used_project FROM tokens WHERE user_id = ?').get(1)
+  );
+  assert.equal(row.last_used_project, null);
+  db.close();
+});
+
 test('deleting a user cascades to delete their tokens (foreign keys enforced)', () => {
   const db = openDb(':memory:');
   db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('bob', 'hash');

@@ -174,6 +174,7 @@ export function renderUsersPage({
   users,
   adminAccounts = [],
   cloudLinksByUserId = new Map(),
+  unlinkedCloudPrincipalCount = 0,
   csrfToken,
   errorCode,
   viewer,
@@ -183,6 +184,15 @@ export function renderUsersPage({
       ? ADMIN_PANEL_ERRORS[errorCode]
       : null;
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
+  // cloud-first-identity-and-passwords: surfaced HERE, not just behind the
+  // nav's separate "Import from Engram Cloud" link — user-requested
+  // (2026-09-18), Cloud is now the only place a new human identity gets
+  // created, so this is the first place an admin should notice one needs
+  // a local login attached.
+  const importBanner =
+    unlinkedCloudPrincipalCount > 0
+      ? `<p class="note">${unlinkedCloudPrincipalCount} Engram Cloud principal(s) with no local login yet — <a href="/admin/engram-cloud/import">Import</a>.</p>`
+      : '';
   const regularRows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
   const adminRows = adminAccounts
     .map((account) => renderAdminAccountRow(account, cloudLinksByUserId.get(account.id) ?? null))
@@ -191,6 +201,7 @@ export function renderUsersPage({
   ${renderAdminNav(csrfToken, viewer)}
   <h1>Users</h1>
   ${errorMarkup}
+  ${importBanner}
   <div class="table-wrap">
   <table>
     <thead>
@@ -390,6 +401,25 @@ export function renderTokenIssuedPage({ username, userId, rawToken }) {
 }
 
 /**
+ * POST /admin/engram-cloud/import's success response, rendered directly
+ * (200, D10 show-once) — mirrors `renderTokenIssuedPage` above exactly
+ * (D11): the generated default LOGIN password (cloud-first-identity-
+ * and-passwords) is shown exactly once, here, and never persisted
+ * anywhere but its bcrypt hash.
+ * @param {{ username: string, rawPassword: string }} options
+ * @returns {string}
+ */
+export function renderImportedPage({ username, rawPassword }) {
+  const body = `<main>
+  <h1>Login created for ${escapeHtml(username)}</h1>
+  <p class="error">Copy this password now — it will not be shown again.</p>
+  <p><code>${escapeHtml(rawPassword)}</code></p>
+  <p><a href="/admin/users">Back to users</a></p>
+</main>`;
+  return renderDocument({ title: 'Admin — Login created', body });
+}
+
+/**
  * One copyable MCP client config block — a read-only `<textarea>`
  * (click-to-select-all, then Ctrl/Cmd+C) is the closest zero-JS
  * equivalent to a real "click to copy" button under this app's CSP
@@ -461,6 +491,7 @@ function renderProfileTokenRow(token, target, viewerId, csrfToken) {
     <td>${escapeHtml(token.label ?? '(no label)')}</td>
     <td>${escapeHtml(token.created_at)}</td>
     <td>${escapeHtml(token.last_used_at ?? 'never')}</td>
+    <td>${escapeHtml(token.last_used_project ?? 'default (private)')}</td>
     <td><span class="badge">${badge}</span></td>
     <td>${actionsMarkup}</td>
   </tr>`;
@@ -470,7 +501,7 @@ function renderProfileTokenRow(token, target, viewerId, csrfToken) {
  * Full gateway-token history (all rows from `listTokensForUser`, active
  * and revoked) — replaces the old single "Current token" block, which
  * only ever showed the one active token and hid everything before it.
- * @param {Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>} gatewayTokens
+ * @param {Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, last_used_project: string | null, revoked_at: string | null }>} gatewayTokens
  * @param {{ id: number }} target
  * @param {number} viewerId
  * @param {string} csrfToken
@@ -481,11 +512,11 @@ function renderProfileGatewayTokensSection(gatewayTokens, target, viewerId, csrf
     .map((token) => renderProfileTokenRow(token, target, viewerId, csrfToken))
     .join('\n');
   return `<h2>Gateway tokens</h2>
-  <p class="note">Authenticates into /mcp/engram — the value shown in the config block(s) above, when freshly issued or regenerated. A raw value is never shown again after that one request (D10) — Regenerate to get a fresh, copyable one.</p>
+  <p class="note">Authenticates into /mcp/engram — the value shown in the config block(s) above, when freshly issued or regenerated. A raw value is never shown again after that one request (D10) — Regenerate to get a fresh, copyable one. "Last project" is the raw X-Engram-Subproject value the client last requested, verbatim — not re-checked against grants here.</p>
   <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
+      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Last project</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
       ${rows}
@@ -527,7 +558,6 @@ function renderProfileCloudTokenRow(token, target, viewerId, csrfToken) {
     <td>${escapeHtml(token.name ?? '(no name)')}</td>
     <td><code>${escapeHtml(token.token_prefix)}…</code></td>
     <td>${escapeHtml(token.created_at)}</td>
-    <td>${escapeHtml(token.last_used_at ?? 'never')}</td>
     <td><span class="badge">${badge}</span>${revokedDetail}</td>
     <td>${actionsMarkup}</td>
   </tr>`;
@@ -555,11 +585,11 @@ function renderProfileCloudTokensSection(cloudTokens, target, viewerId, csrfToke
     .map((token) => renderProfileCloudTokenRow(token, target, viewerId, csrfToken))
     .join('\n');
   return `<h2>Engram Cloud token</h2>
-  <p class="note">Used only for single sign-on into the Cloud dashboard — separate from the gateway token(s) above. Cloud does not track usage count or which device/IP used a token.</p>
+  <p class="note">Used only for single sign-on into the Cloud dashboard — separate from the gateway token(s) above. Cloud does not track usage count, which device/IP used a token, or when it was last used (confirmed: that field is never written by Cloud's own server, for any route — not shown here since it would always read "never").</p>
   <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
+      <tr><th>Name</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr>
     </thead>
     <tbody>
       ${rows}
@@ -595,9 +625,10 @@ function renderProfileGrantRow(grant) {
  * @param {{ id: number }} target
  * @param {{ id: number, role: string }} viewer
  * @param {string} csrfToken
+ * @param {string[]} [knownProjects]
  * @returns {string}
  */
-function renderProfileProjectsSection(grants, target, viewer, csrfToken) {
+function renderProfileProjectsSection(grants, target, viewer, csrfToken, knownProjects = []) {
   const rows = grants.map((grant) => renderProfileGrantRow(grant)).join('\n');
   const table =
     grants.length > 0
@@ -614,12 +645,25 @@ function renderProfileProjectsSection(grants, target, viewer, csrfToken) {
       : '<p class="note">No shared Engram Cloud project grants yet.</p>';
   const userIdField =
     target.id !== viewer.id ? `<input type="hidden" name="userId" value="${target.id}">` : '';
+  // A native <datalist> — zero-JS-compatible (this app's CSP forbids any
+  // <script>), just autocomplete suggestions off every known project any
+  // linked principal has a grant for; the <input> stays free-text so a
+  // genuinely new project name still works (Cloud has no "list all
+  // projects" endpoint to offer a closed set instead — confirmed via
+  // deepwiki, see odd/tasks/cloud-first-identity-and-passwords.md).
+  const knownProjectsDatalist =
+    knownProjects.length > 0
+      ? `<datalist id="known-projects">${knownProjects
+          .map((project) => `<option value="${escapeHtml(project)}">`)
+          .join('')}</datalist>`
+      : '';
   const grantForm =
     viewer.role === 'admin'
       ? `<form method="post" action="/admin/profile/grant-project">
       <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
       ${userIdField}
-      <label>Project <input type="text" name="project" autocomplete="off" required></label>
+      <label>Project <input type="text" name="project" list="known-projects" autocomplete="off" required></label>
+      ${knownProjectsDatalist}
       <button type="submit">Grant</button>
     </form>`
       : '';
@@ -627,6 +671,50 @@ function renderProfileProjectsSection(grants, target, viewer, csrfToken) {
   <p class="note">The default (private) project above is always usable, no grant needed — this list is only SHARED projects, each gated by an explicit grant.</p>
   ${table}
   ${grantForm}`;
+}
+
+/**
+ * Password section (cloud-first-identity-and-passwords) — "Change my
+ * password" is always visible (self-service, any viewer); "Reset
+ * password" is admin-only, for the account being VIEWED (self or another
+ * admin-panel account) — the two forms are deliberately separate routes
+ * (`/admin/profile/change-password` self-only, `/admin/profile/
+ * reset-password` admin-only-any-target), not one form with a role branch
+ * inside a single handler.
+ * @param {{ id: number }} target
+ * @param {{ id: number, role: string }} viewer
+ * @param {string | null} rawPassword
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderProfilePasswordSection(target, viewer, rawPassword, csrfToken) {
+  const rawPasswordMarkup = rawPassword
+    ? `<p class="error">Copy this now — the password will not be shown again.</p>
+    <p><code>${escapeHtml(rawPassword)}</code></p>`
+    : '';
+  const userIdField =
+    target.id !== viewer.id ? `<input type="hidden" name="userId" value="${target.id}">` : '';
+  const resetForm =
+    viewer.role === 'admin'
+      ? `<form method="post" action="/admin/profile/reset-password">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      ${userIdField}
+      <button type="submit">Reset password</button>
+    </form>`
+      : '';
+  const changeForm =
+    target.id === viewer.id
+      ? `<form method="post" action="/admin/profile/change-password">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <label>New password <input type="password" name="password" autocomplete="new-password" required></label>
+      <label>Confirm <input type="password" name="passwordConfirm" autocomplete="new-password" required></label>
+      <button type="submit">Change my password</button>
+    </form>`
+      : '';
+  return `<h2>Password</h2>
+  ${rawPasswordMarkup}
+  ${changeForm}
+  ${resetForm}`;
 }
 
 /**
@@ -650,9 +738,11 @@ function renderProfileProjectsSection(grants, target, viewer, csrfToken) {
  *   viewer: { username: string, role: string, id: number },
  *   subprojects: string[],
  *   grants: Array<{ project: string, granted_by_principal_id: string, created_at: string }>,
+ *   knownProjects?: string[],
  *   rawToken: string | null,
- *   gatewayTokens: Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
+ *   gatewayTokens: Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, last_used_project: string | null, revoked_at: string | null }>,
  *   cloudTokens: Array<{ id: string, name: string | null, token_prefix: string, created_at: string, last_used_at: string | null, revoked_at: string | null, revocation_reason: string | null }> | null,
+ *   rawPassword?: string | null,
  *   mcpUrl: string,
  *   csrfToken: string,
  *   errorCode?: string | null,
@@ -664,9 +754,11 @@ export function renderProfilePage({
   viewer,
   subprojects,
   grants,
+  knownProjects = [],
   rawToken,
   gatewayTokens,
   cloudTokens,
+  rawPassword = null,
   mcpUrl,
   csrfToken,
   errorCode,
@@ -689,9 +781,18 @@ export function renderProfilePage({
   ${errorMarkup}
   ${rawToken ? '<p class="error">Copy this now — the token will not be shown again.</p>' : ''}
   ${configBlocks}
-  ${renderProfileProjectsSection(grants, target, viewer, csrfToken)}
+  <section class="mcp">
+  ${renderProfileProjectsSection(grants, target, viewer, csrfToken, knownProjects)}
+  </section>
+  <section class="mcp">
   ${renderProfileGatewayTokensSection(gatewayTokens, target, viewer.id, csrfToken)}
+  </section>
+  <section class="mcp">
   ${renderProfileCloudTokensSection(cloudTokens, target, viewer.id, csrfToken)}
+  </section>
+  <section class="mcp">
+  ${renderProfilePasswordSection(target, viewer, rawPassword, csrfToken)}
+  </section>
 </main>`;
   return renderDocument({ title: `Admin — Profile: ${target.username}`, body });
 }

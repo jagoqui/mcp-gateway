@@ -54,10 +54,11 @@ function loadUser(db, userId) {
  * Authenticates a Bearer token against the tokens table. Never trusts
  * anything but the raw token string presented on this request.
  * @param {import('better-sqlite3').Database} db
- * @param {string | undefined} authorizationHeader
+ * @param {{ authorization?: string, 'x-engram-subproject'?: string }} headers
  * @returns {any} the authenticated user row, or null
  */
-function authenticateBearer(db, authorizationHeader) {
+function authenticateBearer(db, headers) {
+  const authorizationHeader = headers.authorization;
   if (!authorizationHeader || !authorizationHeader.startsWith('Bearer ')) {
     return null;
   }
@@ -79,7 +80,18 @@ function authenticateBearer(db, authorizationHeader) {
   // profile/tokens pages, but nothing ever wrote to it — every token
   // showed "never" regardless of actual use. Runs only on a successful
   // authentication (never for an invalid/revoked/disabled attempt).
-  db.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?").run(row.id);
+  //
+  // last_used_project (cloud-first-identity-and-passwords): the raw
+  // X-Engram-Subproject header value, verbatim, or NULL when absent
+  // (meaning the caller's own private default project). Observational
+  // only — deliberately NOT re-derived/validated against grants here,
+  // which would duplicate engram-router's deriveProject logic across two
+  // services (D11); a client can ask for anything in this header, granted
+  // or not, and this column just records what was asked.
+  const lastUsedProject = headers['x-engram-subproject'] ?? null;
+  db.prepare(
+    "UPDATE tokens SET last_used_at = datetime('now'), last_used_project = ? WHERE id = ?",
+  ).run(lastUsedProject, row.id);
   return user;
 }
 
@@ -113,12 +125,12 @@ function authenticateCookie(db, cookieHeader, sessionSecret) {
  * CSRF enforcement on a cookie-authenticated write simply by attaching any
  * non-matching Authorization header (threat matrix R4).
  * @param {import('better-sqlite3').Database} db
- * @param {{ authorization?: string, cookie?: string }} headers
+ * @param {{ authorization?: string, cookie?: string, 'x-engram-subproject'?: string }} headers
  * @param {string} sessionSecret
  * @returns {{ user: any, method: 'bearer' | 'cookie' } | null}
  */
 export function authenticateWithMethod(db, headers, sessionSecret) {
-  const bearerUser = authenticateBearer(db, headers.authorization);
+  const bearerUser = authenticateBearer(db, headers);
   if (bearerUser) {
     return { user: bearerUser, method: 'bearer' };
   }
@@ -186,6 +198,7 @@ export function atlassianAuthHeader(db, userId) {
  *   cookie?: string,
  *   accept?: string,
  *   forwardedUri?: string,
+ *   'x-engram-subproject'?: string,
  * }} headers
  * @param {{ domain: string, sessionSecret: string }} config
  * @returns {{ status: number, headers: Record<string, string>, body?: unknown }}

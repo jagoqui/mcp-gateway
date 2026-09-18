@@ -16,6 +16,7 @@ import {
   renderTokenIssuedPage,
   renderConsolePage,
   renderImportPage,
+  renderImportedPage,
   renderProfilePage,
 } from './admin-panel.js';
 import { isAcceptableOrigin, verifyAdminCsrfToken, issueAdminCsrfToken } from './csrf.js';
@@ -35,6 +36,9 @@ import {
   regenerateToken,
   revokeProfileToken,
   importEngramCloudPrincipal,
+  generateDefaultPassword,
+  resetUserPassword,
+  changeUserPassword,
 } from './user-admin.js';
 import {
   listUsers as listEngramCloudUsers,
@@ -494,7 +498,7 @@ async function handlePostAdminLogout(req, res, db, config) {
  * @param {import('better-sqlite3').Database} db
  * @param {URL} url
  */
-function handleGetAdminUsers(req, res, db, url) {
+async function handleGetAdminUsers(req, res, db, url) {
   const adminSecret = getAdminSessionSecret();
   const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
   if (!admin) {
@@ -517,6 +521,15 @@ function handleGetAdminUsers(req, res, db, url) {
       (row) => [row.user_id, row.principal_id],
     ),
   );
+  // cloud-first-identity-and-passwords: best-effort (D2, swallowed) — a
+  // Cloud outage must never break the Users page itself, just hide the
+  // banner for this one view.
+  let unlinkedCloudPrincipalCount = 0;
+  try {
+    unlinkedCloudPrincipalCount = (await listUnlinkedEngramCloudPrincipals(db)).length;
+  } catch {
+    // swallowed
+  }
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   const errorCode = url.searchParams.get('error');
   res.writeHead(200, ADMIN_PAGE_HEADERS);
@@ -525,6 +538,7 @@ function handleGetAdminUsers(req, res, db, url) {
       users,
       adminAccounts,
       cloudLinksByUserId,
+      unlinkedCloudPrincipalCount,
       csrfToken,
       errorCode,
       viewer: { username: admin.username, role: admin.role },
@@ -1458,6 +1472,25 @@ async function handleGetEngramCloudSso(req, res, db) {
 }
 
 /**
+ * Every Engram Cloud principal absent from `engram_cloud_credentials`
+ * (design.md D5: computed fresh via set difference, no cached flag) —
+ * shared by `handleGetEngramCloudImport` (full list) and
+ * `handleGetAdminUsers` (cloud-first-identity-and-passwords: just the
+ * count, for its banner) so the two never diverge (D11).
+ * @param {import('better-sqlite3').Database} db
+ * @returns {Promise<any[]>}
+ */
+async function listUnlinkedEngramCloudPrincipals(db) {
+  const cloudUsers = await listEngramCloudUsers();
+  const linkedPrincipalIds = new Set(
+    /** @type {any[]} */ (db.prepare('SELECT principal_id FROM engram_cloud_credentials').all()).map(
+      (row) => row.principal_id,
+    ),
+  );
+  return cloudUsers.filter((user) => !linkedPrincipalIds.has(user.principal_id));
+}
+
+/**
  * GET /admin/engram-cloud/import (admin-identity-unification) — lists
  * every Engram Cloud principal absent from `engram_cloud_credentials`
  * (design.md D5: computed fresh via set difference, no cached flag).
@@ -1483,20 +1516,13 @@ async function handleGetEngramCloudImport(req, res, db, url) {
   }
 
   /** @type {any[]} */
-  let cloudUsers;
+  let unlinked;
   try {
-    cloudUsers = await listEngramCloudUsers();
+    unlinked = await listUnlinkedEngramCloudPrincipals(db);
   } catch {
     sendJson(res, 502, { error: 'engram_cloud_unreachable' });
     return;
   }
-
-  const linkedPrincipalIds = new Set(
-    /** @type {any[]} */ (db.prepare('SELECT principal_id FROM engram_cloud_credentials').all()).map(
-      (row) => row.principal_id,
-    ),
-  );
-  const unlinked = cloudUsers.filter((user) => !linkedPrincipalIds.has(user.principal_id));
 
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   res.writeHead(200, ADMIN_PAGE_HEADERS);
@@ -1573,14 +1599,18 @@ async function handlePostEngramCloudImport(req, res, db, config) {
   // unlinked-principal list (Unit 3) — same trust level as `principalId`
   // itself: the submitter is already an authenticated admin, not a new
   // trust boundary. Still allow-listed (A13), never passed through raw.
-  const { principalId, username, password, passwordConfirm, role } = data ?? {};
+  //
+  // cloud-first-identity-and-passwords: the password is now SERVER-
+  // GENERATED (generateDefaultPassword, D11 — same generator as
+  // reset-password), never admin-typed — the admin hands the shown-once
+  // value to whoever needs it, same D10 pattern as everywhere else on
+  // this page.
+  const { principalId, username, role } = data ?? {};
   if (
     typeof principalId !== 'string' ||
     !principalId ||
     typeof username !== 'string' ||
     !username ||
-    typeof password !== 'string' ||
-    !password ||
     (role !== 'admin' && role !== 'member')
   ) {
     if (isForm) {
@@ -1591,12 +1621,7 @@ async function handlePostEngramCloudImport(req, res, db, config) {
     sendJson(res, 400, { error: 'invalid_request_body' });
     return;
   }
-
-  if (isForm && password !== passwordConfirm) {
-    res.writeHead(302, { Location: '/admin/engram-cloud/import?error=mismatch' });
-    res.end();
-    return;
-  }
+  const password = generateDefaultPassword();
 
   /** @type {any} */
   let issued;
@@ -1636,11 +1661,11 @@ async function handlePostEngramCloudImport(req, res, db, config) {
   }
 
   if (isForm) {
-    res.writeHead(302, { Location: '/admin/users' });
-    res.end();
+    res.writeHead(200, ADMIN_PAGE_HEADERS);
+    res.end(renderImportedPage({ username, rawPassword: password }));
     return;
   }
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true, rawPassword: password });
 }
 
 /**
@@ -1729,7 +1754,16 @@ async function handleGetAdminProfile(req, res, db, url, config) {
  * @param {string | null} [forcedRawToken]
  * @param {string | null} [errorCode]
  */
-async function sendProfilePage(res, db, admin, target, config, forcedRawToken = null, errorCode = null) {
+async function sendProfilePage(
+  res,
+  db,
+  admin,
+  target,
+  config,
+  forcedRawToken = null,
+  errorCode = null,
+  rawPassword = null,
+) {
   // Self-heal the Cloud link exactly like the SSO route does (D2:
   // swallowed — a Cloud outage must never break this page, just show an
   // empty grants list).
@@ -1779,6 +1813,32 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
     }
   }
 
+  // cloud-first-identity-and-passwords: best-effort aggregation of every
+  // project ANY linked principal is granted, for the Grant form's
+  // <datalist> autocomplete — Cloud has no "list all projects" endpoint
+  // (confirmed via deepwiki), so this is the closest available
+  // approximation, not a claim of completeness. Swallowed per-principal
+  // (D2) — one unreachable Cloud lookup must never break the whole list.
+  const knownProjectsSet = new Set(subprojects);
+  const otherLinkedPrincipals = /** @type {any[]} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE principal_id != ?').all(
+      linkRow?.principal_id ?? '',
+    )
+  );
+  for (const { principal_id: otherPrincipalId } of otherLinkedPrincipals) {
+    try {
+      const result = await listEngramCloudGrants({ principalId: otherPrincipalId });
+      if (Array.isArray(result)) {
+        for (const grant of result) {
+          knownProjectsSet.add(grant.project);
+        }
+      }
+    } catch {
+      // swallowed
+    }
+  }
+  const knownProjects = [...knownProjectsSet];
+
   let rawToken = forcedRawToken;
   let gatewayTokens = listTokensForUser(db, target.id);
   if (!rawToken && !gatewayTokens.some((/** @type {any} */ t) => !t.revoked_at)) {
@@ -1795,9 +1855,11 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
       viewer: { username: admin.username, role: admin.role, id: admin.id },
       subprojects,
       grants,
+      knownProjects,
       rawToken,
       gatewayTokens,
       cloudTokens,
+      rawPassword,
       mcpUrl: `https://${config.domain}/mcp/engram`,
       csrfToken,
       errorCode,
@@ -2228,6 +2290,179 @@ async function handlePostAdminProfileGrantProject(req, res, db, config) {
 }
 
 /**
+ * POST /admin/profile/reset-password (cloud-first-identity-and-passwords)
+ * — admin-only (any target, including their own account) — resetting
+ * someone ELSE's login must never be self-service, unlike change-password
+ * below. Same `rejectNonAdminRole`-before-`resolveProfileTarget` shape as
+ * `handlePostAdminProfileGrantProject` above, for the same reason: a
+ * member must never reach this route at all, even targeting themselves
+ * with no `userId`.
+ *
+ * Success renders the profile page DIRECTLY (200, D10 show-once) via
+ * `sendProfilePage`'s `rawPassword` param — a redirect here would lose the
+ * generated value exactly like the regenerate-token bug fixed earlier this
+ * session; JSON clients get it inline instead.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminProfileResetPassword(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+  if (rejectNonAdminRole(req, res, admin)) {
+    return;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  const { userId } = data ?? {};
+  const target = resolveProfileTarget(res, admin, userId !== undefined ? String(userId) : null, db);
+  if (!target) {
+    return;
+  }
+
+  const result = await resetUserPassword(db, {
+    userId: target.id,
+    actorUserId: admin.id,
+    actorLabel: admin.username,
+  });
+  if (!result) {
+    const redirectTarget =
+      target.id === admin.id ? '/admin/profile' : `/admin/profile?userId=${target.id}`;
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  if (isForm) {
+    await sendProfilePage(res, db, admin, target, config, null, null, result.rawPassword);
+    return;
+  }
+  sendJson(res, 200, { ok: true, rawPassword: result.rawPassword });
+}
+
+/**
+ * POST /admin/profile/change-password (cloud-first-identity-and-passwords)
+ * — self-service, reachable by admin OR member, ALWAYS the caller's own
+ * account. Deliberately does NOT use `resolveProfileTarget` — there is no
+ * legitimate "change someone else's password" case here (that's
+ * reset-password, admin-only, above), so a `userId` in the body is simply
+ * rejected outright rather than silently ignored.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminProfileChangePassword(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  if (data?.userId !== undefined) {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+
+  const { password, passwordConfirm } = data ?? {};
+  if (typeof password !== 'string' || !password) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/profile?error=invalid' });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  if (password !== passwordConfirm) {
+    if (isForm) {
+      res.writeHead(302, { Location: '/admin/profile?error=mismatch' });
+      res.end();
+      return;
+    }
+    sendJson(res, 400, { error: 'password_mismatch' });
+    return;
+  }
+
+  await changeUserPassword(db, {
+    userId: admin.id,
+    password,
+    actorUserId: admin.id,
+    actorLabel: admin.username,
+  });
+
+  if (isForm) {
+    res.writeHead(302, { Location: '/admin/profile' });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
@@ -2267,7 +2502,7 @@ export async function handleAdminRequest(req, res, db, config) {
   }
 
   if (req.method === 'GET' && pathname === '/admin/users') {
-    handleGetAdminUsers(req, res, db, url);
+    await handleGetAdminUsers(req, res, db, url);
     return true;
   }
 
@@ -2338,6 +2573,16 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/profile/grant-project') {
     await handlePostAdminProfileGrantProject(req, res, db, config);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/profile/reset-password') {
+    await handlePostAdminProfileResetPassword(req, res, db, config);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/profile/change-password') {
+    await handlePostAdminProfileChangePassword(req, res, db, config);
     return;
   }
 

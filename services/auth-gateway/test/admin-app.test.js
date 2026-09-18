@@ -654,6 +654,30 @@ test('GET /admin/users renders 200 html with the CSP/no-store/nosniff/same-origi
   assert.ok(!body.includes('<script'));
 });
 
+test('GET /admin/users shows an Import banner when Engram Cloud has unlinked principals, hidden otherwise', async () => {
+  const { cookie } = loginAsAdmin('users-banner-admin');
+  engramCloudResponsesByRoute['GET /admin/users'] = {
+    status: 200,
+    body: [
+      { principal_id: 'p-unlinked-1', username: 'Pruba', role: 'member' },
+    ],
+  };
+
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('Engram Cloud principal(s) with no local login yet'));
+  assert.ok(body.includes('/admin/engram-cloud/import'));
+});
+
+test('GET /admin/users hides the Import banner when there are no unlinked Cloud principals', async () => {
+  const { cookie } = loginAsAdmin('users-nobanner-admin');
+  engramCloudResponsesByRoute['GET /admin/users'] = { status: 200, body: [] };
+
+  const res = await fetch(`${baseUrl}/admin/users`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(!body.includes('with no local login yet'));
+});
+
 // User-requested (2026-09-17): admin-panel accounts (admin/member, the
 // ones created via login/import/bin/admin.js --admin) and their role
 // were invisible anywhere in the UI — GET /admin/users now also lists
@@ -2231,7 +2255,7 @@ test('GET /admin/engram-cloud/import lists a Cloud principal with no local link 
   assert.ok(!body.includes('previously-linked-user'));
 });
 
-test('POST /admin/engram-cloud/import creates a working local account linked to the chosen principal', async () => {
+test('POST /admin/engram-cloud/import creates a working local account with a SERVER-GENERATED password, linked to the chosen principal, shown once (D10, 200 not a redirect)', async () => {
   const { cookie, userId } = loginAsAdmin('import-operator');
   const adminSecret = ADMIN_SECRET;
   const csrf = issueAdminCsrfToken(userId, adminSecret);
@@ -2250,51 +2274,24 @@ test('POST /admin/engram-cloud/import creates a working local account linked to 
     body: new URLSearchParams({
       principalId: 'p-to-import',
       username: 'imported-local-account',
-      password: 'a-strong-password',
-      passwordConfirm: 'a-strong-password',
       role: 'admin',
       csrf,
     }),
     redirect: 'manual',
   });
-  assert.equal(res.status, 302);
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Copy this password now'));
 
   const newUser = /** @type {any} */ (
-    db.prepare('SELECT id FROM users WHERE username = ?').get('imported-local-account')
+    db.prepare('SELECT id, password_hash FROM users WHERE username = ?').get('imported-local-account')
   );
   assert.ok(newUser);
+  assert.ok(newUser.password_hash);
   const link = /** @type {any} */ (
     db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(newUser.id)
   );
   assert.equal(link.principal_id, 'p-to-import');
-});
-
-test('POST /admin/engram-cloud/import with mismatched password confirmation redirects with error=mismatch, creates nothing', async () => {
-  const { cookie, userId } = loginAsAdmin('import-mismatch-operator');
-  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
-
-  const res = await fetch(`${baseUrl}/admin/engram-cloud/import`, {
-    method: 'POST',
-    headers: {
-      Cookie: cookie,
-      Origin: `https://monitor.${DOMAIN}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({
-      principalId: 'p-mismatch',
-      username: 'mismatch-account',
-      password: 'a-strong-password',
-      passwordConfirm: 'does-not-match',
-      role: 'admin',
-      csrf,
-    }),
-    redirect: 'manual',
-  });
-  assert.equal(res.status, 302);
-  assert.equal(res.headers.get('location'), '/admin/engram-cloud/import?error=mismatch');
-  assert.equal(engramCloudRequestLog.length, 0);
-  const row = db.prepare('SELECT 1 FROM users WHERE username = ?').get('mismatch-account');
-  assert.equal(row, undefined);
 });
 
 test('POST /admin/engram-cloud/import with a mismatched Origin returns 403, stub never hit', async () => {
@@ -3050,6 +3047,192 @@ test('POST /admin/profile/grant-project redirects with error=unreachable (and au
   );
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].outcome, 'failure');
+});
+
+// cloud-first-identity-and-passwords: password reset (admin) + change
+// (self), grant datalist, last_used_project column.
+
+test('POST /admin/profile/reset-password (admin, self) shows the generated password directly (200, D10) and audits password.reset', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('pwreset-1');
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('pwreset-1')).id;
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/reset-password`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ csrf }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Copy this now'));
+
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'password.reset'").all()
+  );
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].outcome, 'success');
+  assert.equal(auditRows[0].target_user_id, adminId);
+});
+
+test('POST /admin/profile/reset-password works for an admin resetting a target account, is rejected for a member', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('pwreset-admin');
+  const adminId = /** @type {any} */ (db.prepare('SELECT id FROM users WHERE username = ?').get('pwreset-admin')).id;
+  const { cookie: memberCookie, userId: targetId } = insertAdminAccountWithCloudLink('pwreset-2', 'member', 'p-pwreset-2');
+
+  const memberCsrf = issueAdminCsrfToken(targetId, ADMIN_SECRET);
+  const memberRes = await fetch(`${baseUrl}/admin/profile/reset-password`, {
+    method: 'POST',
+    headers: {
+      Cookie: memberCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ csrf: memberCsrf }),
+  });
+  assert.equal(memberRes.status, 403);
+
+  const adminCsrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+  const adminRes = await fetch(`${baseUrl}/admin/profile/reset-password`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(targetId), csrf: adminCsrf }),
+  });
+  assert.equal(adminRes.status, 200);
+  const body = await adminRes.text();
+  assert.ok(body.includes('Copy this now'));
+});
+
+test('POST /admin/profile/change-password (self, member) updates the password hash and lets the new password log in', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('pwchange-1', 'member', 'p-pwchange-1');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/change-password`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ password: 'brand-new-password-123', passwordConfirm: 'brand-new-password-123', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/admin/profile');
+
+  const { verifyPassword } = await import('../src/tokens.js');
+  const row = /** @type {any} */ (db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId));
+  assert.ok(await verifyPassword('brand-new-password-123', row.password_hash));
+
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'password.change'").all()
+  );
+  assert.equal(auditRows.length, 1);
+});
+
+test('POST /admin/profile/change-password rejects a mismatched confirmation', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('pwchange-2', 'member', 'p-pwchange-2');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/change-password`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ password: 'aaa', passwordConfirm: 'bbb', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(res.headers.get('location')?.includes('error=mismatch'));
+});
+
+test('POST /admin/profile/change-password rejects an explicit userId (always self, never a target)', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('pwchange-3', 'member', 'p-pwchange-3');
+  const { userId: otherId } = insertAdminAccountWithCloudLink('pwchange-4', 'member', 'p-pwchange-4');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/change-password`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ userId: String(otherId), password: 'x', passwordConfirm: 'x', csrf }),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('GET /admin/profile shows both "Change my password" and (admin only) "Reset password" forms', async () => {
+  const { cookie: memberCookie } = insertAdminAccountWithCloudLink('pwforms-1', 'member', 'p-pwforms-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-pwforms-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-pwforms-1/tokens'] = { status: 200, body: [] };
+  const memberRes = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: memberCookie } });
+  const memberBody = await memberRes.text();
+  assert.ok(memberBody.includes('action="/admin/profile/change-password"'));
+  assert.ok(!memberBody.includes('action="/admin/profile/reset-password"'));
+
+  const { cookie: adminCookie } = loginAsAdmin('pwforms-admin');
+  const adminRes = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: adminCookie } });
+  const adminBody = await adminRes.text();
+  assert.ok(adminBody.includes('action="/admin/profile/change-password"'));
+  assert.ok(adminBody.includes('action="/admin/profile/reset-password"'));
+});
+
+test('GET /admin/profile renders a <datalist> of known projects aggregated across linked principals, for the Grant input', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('datalist-admin');
+  engramCloudResponsesByRoute['GET /admin/users/p-datalist-2/grants'] = {
+    status: 200,
+    body: [{ principal_id: 'p-datalist-2', project: 'other-teams-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' }],
+  };
+  insertAdminAccountWithCloudLink('datalist-2', 'member', 'p-datalist-2');
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: adminCookie } });
+  const body = await res.text();
+  assert.ok(body.includes('id="known-projects"'));
+  assert.ok(body.includes('other-teams-project'));
+  assert.ok(body.includes('list="known-projects"'));
+});
+
+test('GET /admin/profile\'s Gateway tokens table shows "Last project" (default (private) when null, the raw value otherwise)', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('lastproj-1', 'member', 'p-lastproj-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-lastproj-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-lastproj-1/tokens'] = { status: 200, body: [] };
+  await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  db.prepare("UPDATE tokens SET last_used_project = 'team-shared-project' WHERE user_id = ?").run(userId);
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('team-shared-project'));
+  assert.ok(body.includes('default (private)') || body.includes('Last project'));
+});
+
+test('GET /admin/profile\'s Engram Cloud token section no longer shows a "Last used" column (dead field, confirmed via deepwiki Cloud never writes it)', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('nolastused-1', 'admin', 'p-nolastused-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-nolastused-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-nolastused-1/tokens'] = {
+    status: 200,
+    body: [
+      { id: 'tok1', principal_id: 'p-nolastused-1', token_prefix: 'eg_x', name: 'console-sso', created_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z', last_used_at: null, revoked_at: null, revoked_by_principal_id: null, revocation_reason: null },
+    ],
+  };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('Engram Cloud token'));
+  // Scoped to the Cloud token table's own thead specifically — the
+  // Gateway tokens table ABOVE it still legitimately has a real "Last
+  // used" column (that one IS accurate, per the earlier fix this session).
+  assert.ok(body.includes('<tr><th>Name</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr>'));
 });
 
 // engram-shared-projects — GET /internal/engram-grant: service-to-service

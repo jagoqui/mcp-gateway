@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   label TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_used_at TEXT,
+  last_used_project TEXT,
   revoked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
@@ -85,6 +86,23 @@ function migrateAddUsersRoleColumn(db) {
 }
 
 /**
+ * Same reasoning as migrateAddUsersRoleColumn above: `tokens` predates
+ * `last_used_project` (cloud-first-identity-and-passwords), so a
+ * pre-existing on-disk database never gains it from `CREATE TABLE IF NOT
+ * EXISTS` alone.
+ * @param {import('better-sqlite3').Database} db
+ * @returns {void}
+ */
+function migrateAddTokensLastUsedProjectColumn(db) {
+  const columns = /** @type {{ name: string }[]} */ (db.prepare('PRAGMA table_info(tokens)').all());
+  const hasColumn = columns.some((column) => column.name === 'last_used_project');
+  if (hasColumn) {
+    return;
+  }
+  db.exec('ALTER TABLE tokens ADD COLUMN last_used_project TEXT');
+}
+
+/**
  * Applies the auth-gateway schema (idempotent, CREATE ... IF NOT EXISTS)
  * to an already-open database handle, then runs any migrations a fresh
  * `CREATE TABLE IF NOT EXISTS` cannot express against a pre-existing
@@ -95,6 +113,7 @@ function migrateAddUsersRoleColumn(db) {
 export function applySchema(db) {
   db.exec(SCHEMA);
   migrateAddUsersRoleColumn(db);
+  migrateAddTokensLastUsedProjectColumn(db);
 }
 
 /**

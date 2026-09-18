@@ -326,6 +326,34 @@ test('a valid Bearer token bumps that exact token\'s last_used_at (found live 20
   assert.ok(after.last_used_at, 'last_used_at must be set after a successful Bearer auth');
 });
 
+test('a Bearer token with X-Engram-Subproject records that raw project value in last_used_project (cloud-first-identity-and-passwords)', () => {
+  const userId = insertUser({ username: 'paul' });
+  insertToken(userId, 'pauls-token');
+
+  authenticateWithMethod(
+    db,
+    { authorization: 'Bearer pauls-token', 'x-engram-subproject': 'team-shared-project' },
+    SESSION_SECRET,
+  );
+
+  const row = /** @type {any} */ (
+    db.prepare('SELECT last_used_project FROM tokens WHERE user_id = ?').get(userId)
+  );
+  assert.equal(row.last_used_project, 'team-shared-project');
+});
+
+test('a Bearer token with no X-Engram-Subproject leaves last_used_project null (private default)', () => {
+  const userId = insertUser({ username: 'quinn' });
+  insertToken(userId, 'quinns-token');
+
+  authenticateWithMethod(db, { authorization: 'Bearer quinns-token' }, SESSION_SECRET);
+
+  const row = /** @type {any} */ (
+    db.prepare('SELECT last_used_project FROM tokens WHERE user_id = ?').get(userId)
+  );
+  assert.equal(row.last_used_project, null);
+});
+
 test('an invalid/revoked Bearer token never touches last_used_at', () => {
   const userId = insertUser({ username: 'olivia' });
   insertToken(userId, 'olivias-token', { revoked: true });

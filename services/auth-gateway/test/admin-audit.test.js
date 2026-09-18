@@ -55,7 +55,7 @@ test('AUDIT_ACTIONS is the frozen list from the design', () => {
   assert.deepEqual(AUDIT_ACTIONS, [
     'login', 'logout', 'user.create', 'user.disable',
     'user.enable', 'token.issue', 'token.revoke', 'token.regenerate',
-    'cloud_token.revoke', 'project.grant',
+    'cloud_token.revoke', 'project.grant', 'password.reset', 'password.change',
   ]);
   assert.ok(Object.isFrozen(AUDIT_ACTIONS));
 });

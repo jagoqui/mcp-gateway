@@ -20,6 +20,8 @@ export const AUDIT_ACTIONS = Object.freeze([
   'token.regenerate',
   'cloud_token.revoke',
   'project.grant',
+  'password.reset',
+  'password.change',
 ]);
 
 /**

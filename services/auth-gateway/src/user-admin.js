@@ -367,13 +367,13 @@ export function getAdminAccount(db, userId) {
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
  * @returns {Array<{ id: number, label: string | null, created_at: string,
- *   last_used_at: string | null, revoked_at: string | null }>}
+ *   last_used_at: string | null, last_used_project: string | null, revoked_at: string | null }>}
  */
 export function listTokensForUser(db, userId) {
   return /** @type {any[]} */ (
     db
       .prepare(
-        'SELECT id, label, created_at, last_used_at, revoked_at FROM tokens WHERE user_id = ? ORDER BY created_at DESC',
+        'SELECT id, label, created_at, last_used_at, last_used_project, revoked_at FROM tokens WHERE user_id = ? ORDER BY created_at DESC',
       )
       .all(userId)
   );
@@ -533,6 +533,89 @@ export function revokeProfileToken(db, opts) {
       outcome: 'success',
       targetUserId: userId,
       targetTokenId: tokenId,
+    });
+    return true;
+  });
+  return runTransaction();
+}
+
+/**
+ * A random default password (cloud-first-identity-and-passwords) — reuses
+ * the exact same `crypto.randomBytes(TOKEN_BYTES).toString('base64url')`
+ * shape already used for every raw token this file generates (D11, no new
+ * RNG pattern). Shared by both `resetUserPassword` below and the
+ * `/admin/engram-cloud/import` flow (admin-app.js), which used to require
+ * an admin to type a password by hand.
+ * @returns {string}
+ */
+export function generateDefaultPassword() {
+  return crypto.randomBytes(TOKEN_BYTES).toString('base64url');
+}
+
+/**
+ * Resets an admin-panel account's login password to a fresh random value
+ * (D10 show-once — the raw value is returned exactly once, here, and never
+ * persisted anywhere but its bcrypt hash). `hashPassword` runs BEFORE the
+ * transaction (async, same createManagedUser split as elsewhere in this
+ * file — better-sqlite3 transactions must be synchronous). Admin-only by
+ * construction of its caller (admin-app.js checks `rejectNonAdminRole`
+ * before ever reaching this) — no `is_admin`/role restriction here, since
+ * an admin resetting ANY admin-panel account's password, including their
+ * own, is legitimate and not Cloud-mediated.
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ userId: number, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {Promise<{ rawPassword: string } | null>}
+ */
+export async function resetUserPassword(db, opts) {
+  const { userId, actorUserId, actorLabel } = opts;
+  const rawPassword = generateDefaultPassword();
+  const passwordHash = await hashPassword(rawPassword);
+  const runTransaction = db.transaction(() => {
+    const result = db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
+      passwordHash,
+      userId,
+    );
+    if (result.changes === 0) {
+      return false;
+    }
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'password.reset',
+      outcome: 'success',
+      targetUserId: userId,
+    });
+    return true;
+  });
+  return runTransaction() ? { rawPassword } : null;
+}
+
+/**
+ * Changes an admin-panel account's own login password to a caller-chosen
+ * value — self-service, always scoped to `userId` (the caller's own id;
+ * admin-app.js never lets this target anyone else). No raw value to
+ * return (D10 doesn't apply — the caller already knows what they typed).
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ userId: number, password: string, actorUserId: number | null, actorLabel: string }} opts
+ * @returns {Promise<boolean>}
+ */
+export async function changeUserPassword(db, opts) {
+  const { userId, password, actorUserId, actorLabel } = opts;
+  const passwordHash = await hashPassword(password);
+  const runTransaction = db.transaction(() => {
+    const result = db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
+      passwordHash,
+      userId,
+    );
+    if (result.changes === 0) {
+      return false;
+    }
+    recordAudit(db, {
+      actorUserId,
+      actorLabel,
+      action: 'password.change',
+      outcome: 'success',
+      targetUserId: userId,
     });
     return true;
   });
