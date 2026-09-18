@@ -416,11 +416,167 @@ function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
 }
 
 /**
+ * One row of the profile page's OWN gateway-token history table — same
+ * visual shape as `renderTokenRow` above (regular users' `/admin/users/
+ * tokens` page), but the actions post to the `/admin/profile/*` routes,
+ * which use `resolveProfileTarget` (self for anyone, `userId` admin-only)
+ * instead of `getManagedUser`/is_admin=0 eligibility.
+ *
+ * `userId` is only emitted when `target.id !== viewerId` — a REAL bug,
+ * found while adding this table (2026-09-18): the old single-token
+ * markup always emitted `userId`, even for a member looking at their
+ * OWN profile, and `resolveProfileTarget` rejects ANY non-null `userId`
+ * from a non-admin, even one matching their own id. A member clicking
+ * Regenerate/Revoke through the real rendered form got a 403 — never
+ * caught because every existing test built its POST body by hand,
+ * without a `userId` key, instead of submitting what this form actually
+ * emits.
+ * @param {{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }} token
+ * @param {{ id: number }} target
+ * @param {number} viewerId
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderProfileTokenRow(token, target, viewerId, csrfToken) {
+  const active = !token.revoked_at;
+  const badge = active ? 'active' : 'revoked';
+  const userIdField =
+    target.id !== viewerId ? `<input type="hidden" name="userId" value="${target.id}">` : '';
+  const actionsMarkup = active
+    ? `<form method="post" action="/admin/profile/regenerate-token">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <input type="hidden" name="tokenId" value="${token.id}">
+      ${userIdField}
+      <button type="submit">Regenerate</button>
+    </form>
+    <form method="post" action="/admin/profile/revoke-token">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <input type="hidden" name="tokenId" value="${token.id}">
+      ${userIdField}
+      <button type="submit">Revoke</button>
+    </form>`
+    : '';
+  return `<tr>
+    <td>${escapeHtml(token.label ?? '(no label)')}</td>
+    <td>${escapeHtml(token.created_at)}</td>
+    <td>${escapeHtml(token.last_used_at ?? 'never')}</td>
+    <td><span class="badge">${badge}</span></td>
+    <td>${actionsMarkup}</td>
+  </tr>`;
+}
+
+/**
+ * Full gateway-token history (all rows from `listTokensForUser`, active
+ * and revoked) — replaces the old single "Current token" block, which
+ * only ever showed the one active token and hid everything before it.
+ * @param {Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>} gatewayTokens
+ * @param {{ id: number }} target
+ * @param {number} viewerId
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderProfileGatewayTokensSection(gatewayTokens, target, viewerId, csrfToken) {
+  const rows = gatewayTokens
+    .map((token) => renderProfileTokenRow(token, target, viewerId, csrfToken))
+    .join('\n');
+  return `<h2>Gateway tokens</h2>
+  <p class="note">Authenticates into /mcp/engram — the value shown in the config block(s) above, when freshly issued or regenerated. A raw value is never shown again after that one request (D10) — Regenerate to get a fresh, copyable one.</p>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      ${rows}
+    </tbody>
+  </table>
+  </div>`;
+}
+
+/**
+ * One row of Engram Cloud's OWN token list (`GET /admin/users/{id}/
+ * tokens`, confirmed via deepwiki against `Gentleman-Programming/engram`
+ * — `adminTokenMetadata`). Only `token_prefix` is ever returned by Cloud,
+ * never the full secret (D10 holds there too, just enforced server-side
+ * by Cloud itself). Cloud tracks NO usage count and NO client/machine/IP
+ * for a token — nothing here claims otherwise.
+ * @param {{ id: string, name: string | null, token_prefix: string, created_at: string, last_used_at: string | null, revoked_at: string | null, revocation_reason: string | null }} token
+ * @param {{ id: number }} target
+ * @param {number} viewerId
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderProfileCloudTokenRow(token, target, viewerId, csrfToken) {
+  const active = !token.revoked_at;
+  const badge = active ? 'active' : 'revoked';
+  const revokedDetail = !active
+    ? ` — ${escapeHtml(token.revocation_reason ?? 'no reason given')}`
+    : '';
+  const userIdField =
+    target.id !== viewerId ? `<input type="hidden" name="userId" value="${target.id}">` : '';
+  const actionsMarkup = active
+    ? `<form method="post" action="/admin/profile/cloud-token/revoke">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
+      <input type="hidden" name="tokenId" value="${escapeHtml(token.id)}">
+      ${userIdField}
+      <button type="submit">Revoke</button>
+    </form>`
+    : '';
+  return `<tr>
+    <td>${escapeHtml(token.name ?? '(no name)')}</td>
+    <td><code>${escapeHtml(token.token_prefix)}…</code></td>
+    <td>${escapeHtml(token.created_at)}</td>
+    <td>${escapeHtml(token.last_used_at ?? 'never')}</td>
+    <td><span class="badge">${badge}</span>${revokedDetail}</td>
+    <td>${actionsMarkup}</td>
+  </tr>`;
+}
+
+/**
+ * Engram Cloud's own token section — separate from the gateway tokens
+ * above on purpose: this is a DIFFERENT system (Cloud's own admin API,
+ * not auth-gateway's SQLite `tokens` table), used only for single
+ * sign-on into Cloud's own dashboard, not for MCP access at all.
+ * `cloudTokens === null` (no Cloud link at all — `ensureEngramCloudLink`
+ * failed and never self-healed) hides the section entirely; an empty
+ * array still renders the (empty) table, distinct states on purpose.
+ * @param {Array<{ id: string, name: string | null, token_prefix: string, created_at: string, last_used_at: string | null, revoked_at: string | null, revocation_reason: string | null }> | null} cloudTokens
+ * @param {{ id: number }} target
+ * @param {number} viewerId
+ * @param {string} csrfToken
+ * @returns {string}
+ */
+function renderProfileCloudTokensSection(cloudTokens, target, viewerId, csrfToken) {
+  if (cloudTokens === null) {
+    return '';
+  }
+  const rows = cloudTokens
+    .map((token) => renderProfileCloudTokenRow(token, target, viewerId, csrfToken))
+    .join('\n');
+  return `<h2>Engram Cloud token</h2>
+  <p class="note">Used only for single sign-on into the Cloud dashboard — separate from the gateway token(s) above. Cloud does not track usage count or which device/IP used a token.</p>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      ${rows}
+    </tbody>
+  </table>
+  </div>`;
+}
+
+/**
  * GET /admin/profile[?userId=N] (mcp-profile-page) — one account's MCP
  * client config (Bearer token + granted subprojects), self-service for
- * both admin and member. `rawToken` is only ever non-null on the
- * request that just issued/regenerated it (D10) — every later view
- * shows `tokenMeta` instead, with no live secret anywhere on the page.
+ * both admin and member, PLUS full lifecycle for both token systems this
+ * account has: the gateway token(s) that actually authenticate into
+ * /mcp/engram, and Engram Cloud's own separate token (dashboard SSO
+ * only). `rawToken` is only ever non-null on the request that just
+ * issued/regenerated a gateway token (D10) — every later view shows
+ * `gatewayTokens` metadata instead, with no live secret anywhere on the
+ * page.
  *
  * No real "click to copy" button exists here — this app's CSP
  * (`default-src 'none'`, no `script-src`) makes that impossible, the
@@ -429,16 +585,26 @@ function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
  * Ctrl/Cmd+A, then copy.
  * @param {{
  *   target: { id: number, username: string, role: string },
- *   viewer: { username: string, role: string },
+ *   viewer: { username: string, role: string, id: number },
  *   subprojects: string[],
  *   rawToken: string | null,
- *   tokenMeta: { id: number, label: string | null, created_at: string, last_used_at: string | null } | null,
+ *   gatewayTokens: Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
+ *   cloudTokens: Array<{ id: string, name: string | null, token_prefix: string, created_at: string, last_used_at: string | null, revoked_at: string | null, revocation_reason: string | null }> | null,
  *   mcpUrl: string,
  *   csrfToken: string,
  * }} options
  * @returns {string}
  */
-export function renderProfilePage({ target, viewer, subprojects, rawToken, tokenMeta, mcpUrl, csrfToken }) {
+export function renderProfilePage({
+  target,
+  viewer,
+  subprojects,
+  rawToken,
+  gatewayTokens,
+  cloudTokens,
+  mcpUrl,
+  csrfToken,
+}) {
   const configBlocks = rawToken
     ? [
         renderMcpConfigBlock({ mcpUrl, rawToken, subproject: null }),
@@ -446,33 +612,10 @@ export function renderProfilePage({ target, viewer, subprojects, rawToken, token
       ].join('\n')
     : '';
   const noGrantsNote =
-    rawToken && subprojects.length === 0
-      ? '<p class="note">No shared Engram Cloud project grants yet — ask an admin for one. Your default (private) config above always works.</p>'
-      : '';
-  const existingTokenMarkup =
-    !rawToken && tokenMeta
-      ? `<div class="mcp">
-    <h2>Current token</h2>
-    <p class="note">Label: ${escapeHtml(tokenMeta.label ?? '(no label)')} — created ${escapeHtml(tokenMeta.created_at)} — last used ${escapeHtml(tokenMeta.last_used_at ?? 'never')}.</p>
-    <p class="note">The raw value is never shown again after it was issued — regenerate to get a fresh, copyable one.</p>
-    ${
-      subprojects.length > 0
-        ? `<p>Granted subprojects: ${subprojects.map((s) => escapeHtml(s)).join(', ')}</p>`
-        : '<p class="note">No Engram Cloud project grants yet.</p>'
-    }
-    <form method="post" action="/admin/profile/regenerate-token">
-      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
-      <input type="hidden" name="tokenId" value="${tokenMeta.id}">
-      <input type="hidden" name="userId" value="${target.id}">
-      <button type="submit">Regenerate</button>
-    </form>
-    <form method="post" action="/admin/profile/revoke-token">
-      <input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">
-      <input type="hidden" name="tokenId" value="${tokenMeta.id}">
-      <input type="hidden" name="userId" value="${target.id}">
-      <button type="submit">Revoke</button>
-    </form>
-  </div>`
+    subprojects.length === 0
+      ? rawToken
+        ? '<p class="note">No shared Engram Cloud project grants yet — ask an admin for one. Your default (private) config above always works.</p>'
+        : '<p class="note">No shared Engram Cloud project grants yet.</p>'
       : '';
   const body = `<main>
   <p class="note">Logged in as ${escapeHtml(viewer.username)} (${escapeHtml(viewer.role)})</p>
@@ -481,7 +624,9 @@ export function renderProfilePage({ target, viewer, subprojects, rawToken, token
   ${rawToken ? '<p class="error">Copy this now — the token will not be shown again.</p>' : ''}
   ${configBlocks}
   ${noGrantsNote}
-  ${existingTokenMarkup}
+  ${!rawToken && subprojects.length > 0 ? `<p>Granted subprojects: ${subprojects.map((s) => escapeHtml(s)).join(', ')}</p>` : ''}
+  ${renderProfileGatewayTokensSection(gatewayTokens, target, viewer.id, csrfToken)}
+  ${renderProfileCloudTokensSection(cloudTokens, target, viewer.id, csrfToken)}
 </main>`;
   return renderDocument({ title: `Admin — Profile: ${target.username}`, body });
 }

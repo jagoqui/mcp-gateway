@@ -7,6 +7,8 @@ import {
   grantProject,
   listGrants,
   issueToken,
+  listTokens,
+  revokeCloudToken,
   loginDashboard,
 } from '../src/engram-cloud-client.js';
 
@@ -130,6 +132,53 @@ test('issueToken sends POST /admin/users/:id/tokens with an optional name, and r
 test('issueToken omits the name field entirely when no label is given', async () => {
   await issueToken({ principalId: 'p2' });
   assert.deepEqual(JSON.parse(/** @type {string} */ (lastRequest.body)), {});
+});
+
+test('listTokens sends GET /admin/users/:id/tokens, no body, and returns the array as-is', async () => {
+  nextResponse = {
+    status: 200,
+    body: [
+      {
+        id: 't1',
+        principal_id: 'p2',
+        token_prefix: 'eg_abcd',
+        name: 'console-sso',
+        created_by_principal_id: 'p1',
+        created_at: '2026-01-01T00:00:00Z',
+        last_used_at: null,
+        revoked_at: null,
+        revoked_by_principal_id: null,
+        revocation_reason: null,
+      },
+    ],
+  };
+  const result = await listTokens({ principalId: 'p2' });
+  assert.equal(lastRequest.method, 'GET');
+  assert.equal(lastRequest.url, '/admin/users/p2/tokens');
+  assert.equal(lastRequest.body, '');
+  assert.equal(result.length, 1);
+  assert.equal(result[0].token_prefix, 'eg_abcd');
+});
+
+test('listTokens URL-encodes a principalId containing special characters', async () => {
+  await listTokens({ principalId: 'p/2 x' });
+  assert.equal(lastRequest.url, '/admin/users/p%2F2%20x/tokens');
+});
+
+test('revokeCloudToken sends POST /admin/tokens/:id/revoke with the reason body', async () => {
+  nextResponse = { status: 200, body: { id: 't1', revoked_at: '2026-01-02T00:00:00Z' } };
+  const result = await revokeCloudToken({ tokenId: 't1', reason: 'revoked via admin panel' });
+  assert.equal(lastRequest.method, 'POST');
+  assert.equal(lastRequest.url, '/admin/tokens/t1/revoke');
+  assert.deepEqual(JSON.parse(/** @type {string} */ (lastRequest.body)), {
+    reason: 'revoked via admin panel',
+  });
+  assert.equal(result.id, 't1');
+});
+
+test('revokeCloudToken URL-encodes a tokenId containing special characters', async () => {
+  await revokeCloudToken({ tokenId: 't/1 x', reason: 'r' });
+  assert.equal(lastRequest.url, '/admin/tokens/t%2F1%20x/revoke');
 });
 
 test('threat: a non-2xx response throws an Error whose message never contains the admin token', async () => {

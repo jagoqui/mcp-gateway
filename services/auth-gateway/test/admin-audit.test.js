@@ -55,6 +55,7 @@ test('AUDIT_ACTIONS is the frozen list from the design', () => {
   assert.deepEqual(AUDIT_ACTIONS, [
     'login', 'logout', 'user.create', 'user.disable',
     'user.enable', 'token.issue', 'token.revoke', 'token.regenerate',
+    'cloud_token.revoke',
   ]);
   assert.ok(Object.isFrozen(AUDIT_ACTIONS));
 });
@@ -81,6 +82,20 @@ test('detail strips any key outside the allow-list before JSON.stringify', () =>
   assert.deepEqual(Object.keys(detail).sort(), ['label', 'reason', 'revokedTokenId', 'username']);
   assert.ok(!rows[0].detail.includes('super-secret'));
   assert.ok(!rows[0].detail.includes('should-never-appear'));
+});
+
+test('cloud_token.revoke accepts a cloudTokenId detail (opaque string, never the numeric target_token_id column)', () => {
+  recordAudit(db, {
+    actorUserId: null,
+    actorLabel: 'alice',
+    action: 'cloud_token.revoke',
+    outcome: 'success',
+    detail: { cloudTokenId: 'tok_abc123' },
+  });
+
+  const rows = allAuditRows();
+  assert.equal(rows[0].target_token_id, null);
+  assert.deepEqual(JSON.parse(rows[0].detail), { cloudTokenId: 'tok_abc123' });
 });
 
 test('actorUserId: null is accepted (failed-login case)', () => {

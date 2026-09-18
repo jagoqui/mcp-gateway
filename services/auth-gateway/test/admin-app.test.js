@@ -2597,6 +2597,243 @@ test('POST /admin/profile/revoke-token works for an admin revoking another admin
   assert.equal(activeCount, 0);
 });
 
+// Both-token-systems-shown-separately (user-requested 2026-09-18, after
+// verifying via deepwiki against Gentleman-Programming/engram what Cloud
+// actually tracks: no usage count, no client/machine/IP, ever).
+
+test('GET /admin/profile (self) does NOT emit a userId hidden field on the Regenerate/Revoke forms — the real bug fix', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('profile-selfbug-1', 'member', 'p-profile-selfbug-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-selfbug-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-selfbug-1/tokens'] = { status: 200, body: [] };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(!body.includes('name="userId"'));
+});
+
+test('GET /admin/profile?userId=N (admin viewing another account) DOES emit the userId hidden field', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-selfbug-admin');
+  const { userId: targetId } = insertAdminAccountWithCloudLink('profile-selfbug-2', 'member', 'p-profile-selfbug-2');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-selfbug-2/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-selfbug-2/tokens'] = { status: 200, body: [] };
+
+  const res = await fetch(`${baseUrl}/admin/profile?userId=${targetId}`, { headers: { Cookie: adminCookie } });
+  const body = await res.text();
+  assert.ok(body.includes(`name="userId" value="${targetId}"`));
+});
+
+test('A member submitting EXACTLY what the self-view Regenerate form emits (no userId key) succeeds, not 403 (reproduces the real live bug)', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-selfbug-3', 'member', 'p-profile-selfbug-3');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-selfbug-3/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-selfbug-3/tokens'] = { status: 200, body: [] };
+  const getRes = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const getBody = await getRes.text();
+  assert.ok(!getBody.includes('name="userId"'), 'precondition: self form must not include userId');
+
+  const activeToken = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
+  );
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  const res = await fetch(`${baseUrl}/admin/profile/regenerate-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    // Deliberately no `userId` key — exactly what the real form (fixed
+    // above) now submits for self, unlike before the fix.
+    body: new URLSearchParams({ tokenId: String(activeToken.id), csrf }),
+  });
+  assert.equal(res.status, 200);
+});
+
+test('GET /admin/profile renders the full gateway-token HISTORY (active and revoked), not just the current one', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-history-1', 'member', 'p-profile-history-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-history-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-history-1/tokens'] = { status: 200, body: [] };
+  await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const firstToken = /** @type {any} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? AND revoked_at IS NULL').get(userId)
+  );
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+  await fetch(`${baseUrl}/admin/profile/regenerate-token`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: String(firstToken.id), csrf }),
+  });
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  const tokenRows = /** @type {any[]} */ (
+    db.prepare('SELECT id FROM tokens WHERE user_id = ? ORDER BY id').all(userId)
+  );
+  assert.equal(tokenRows.length, 2);
+  // The revoked (first) row renders NO tokenId value at all — by design,
+  // Regenerate/Revoke only ever render for an active token (dead-end
+  // actions are never offered) — so the only reliable signal that BOTH
+  // rows made it into the table is the total row count, via one badge
+  // <td> per token row (the Cloud tokens table is stubbed empty above,
+  // so every badge <td> in this body belongs to the gateway table).
+  const badgeCellCount = (body.match(/<td><span class="badge">/g) ?? []).length;
+  assert.equal(badgeCellCount, 2);
+  assert.ok(body.includes(`value="${tokenRows[1].id}"`), 'the active (second) token row must offer actions');
+  assert.ok(body.includes('revoked'));
+  assert.ok(body.includes('active'));
+});
+
+test('GET /admin/profile shows a separate "Engram Cloud token" section, with revoked tokens showing their reason', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('profile-cloud-1', 'admin', 'p-profile-cloud-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-cloud-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-cloud-1/tokens'] = {
+    status: 200,
+    body: [
+      {
+        id: 'tok_active_1', principal_id: 'p-profile-cloud-1', token_prefix: 'eg_live',
+        name: 'console-sso', created_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z',
+        last_used_at: '2026-01-05T00:00:00Z', revoked_at: null, revoked_by_principal_id: null, revocation_reason: null,
+      },
+      {
+        id: 'tok_old_1', principal_id: 'p-profile-cloud-1', token_prefix: 'eg_dead',
+        name: 'console-sso', created_by_principal_id: 'p-admin', created_at: '2025-12-01T00:00:00Z',
+        last_used_at: null, revoked_at: '2025-12-15T00:00:00Z', revoked_by_principal_id: 'p-admin',
+        revocation_reason: 'revoked via admin panel',
+      },
+    ],
+  };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  const body = await res.text();
+  assert.ok(body.includes('Engram Cloud token'));
+  assert.ok(body.includes('eg_live'));
+  assert.ok(body.includes('eg_dead'));
+  assert.ok(body.includes('revoked via admin panel'));
+  // The honest disclaimer legitimately SAYS "usage count"/"machine" to
+  // explain they're NOT tracked — the real guard is that no column or
+  // value in the table itself claims to show one.
+  assert.ok(!body.includes('<th>Machine</th>'));
+  assert.ok(!body.includes('<th>IP</th>'));
+  assert.ok(!body.includes('<th>Usage</th>'));
+});
+
+test('GET /admin/profile hides the Engram Cloud token section entirely when there is no Cloud link at all (self-heal failed)', async () => {
+  const userId = insertUser({ username: 'profile-nolinkatall', isAdmin: true, role: 'admin' });
+  const cookie = `__Host-admin_session=${createAdminSessionToken(userId, ADMIN_SECRET)}`;
+  // No stub for POST /admin/users → falls back to nextEngramCloudResponse's
+  // default {status:200, body:{}}, missing principal_id → createEngramCloudUser
+  // fails → ensureEngramCloudLink throws, swallowed, no credential row saved.
+  nextEngramCloudResponse = { status: 500, body: { error: 'unreachable' } };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(!body.includes('Engram Cloud token'));
+});
+
+test('a non-array Cloud tokens response never crashes the page (defensive, not just optimistic) — same class of bug as the redirect-loses-the-token fix', async () => {
+  const { cookie } = insertAdminAccountWithCloudLink('profile-malformed-1', 'admin', 'p-profile-malformed-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-malformed-1/grants'] = { status: 200, body: [] };
+  engramCloudResponsesByRoute['GET /admin/users/p-profile-malformed-1/tokens'] = { status: 200, body: {} };
+
+  const res = await fetch(`${baseUrl}/admin/profile`, { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.ok(body.includes('Engram Cloud token'));
+});
+
+test('POST /admin/profile/cloud-token/revoke (self) revokes a Cloud token and records an audit row', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-cloudrevoke-1', 'member', 'p-profile-cloudrevoke-1');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/cloud-token/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: 'tok_abc', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(lastEngramCloudRequest?.method, 'POST');
+  assert.equal(lastEngramCloudRequest?.url, '/admin/tokens/tok_abc/revoke');
+  assert.deepEqual(JSON.parse(/** @type {string} */ (lastEngramCloudRequest?.body)), {
+    reason: 'revoked via admin panel',
+  });
+
+  const auditRows = /** @type {any[]} */ (
+    db.prepare("SELECT * FROM admin_audit_log WHERE action = 'cloud_token.revoke'").all()
+  );
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].outcome, 'success');
+  assert.equal(auditRows[0].target_user_id, userId);
+  assert.equal(auditRows[0].target_token_id, null);
+  assert.deepEqual(JSON.parse(auditRows[0].detail), { cloudTokenId: 'tok_abc' });
+});
+
+test('POST /admin/profile/cloud-token/revoke with a userId for another account is rejected for a member', async () => {
+  const { cookie, userId } = insertAdminAccountWithCloudLink('profile-cloudrevoke-2', 'member', 'p-profile-cloudrevoke-2');
+  const { userId: otherId } = insertAdminAccountWithCloudLink('profile-cloudrevoke-3', 'member', 'p-profile-cloudrevoke-3');
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/cloud-token/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: 'tok_abc', userId: String(otherId), csrf }),
+  });
+  assert.equal(res.status, 403);
+});
+
+test('POST /admin/profile/cloud-token/revoke works for an admin revoking a target account\'s Cloud token', async () => {
+  const { cookie: adminCookie } = loginAsAdmin('profile-cloudrevoke-admin');
+  const { userId: targetId } = insertAdminAccountWithCloudLink('profile-cloudrevoke-4', 'member', 'p-profile-cloudrevoke-4');
+  const adminId = /** @type {any} */ (
+    db.prepare('SELECT id FROM users WHERE username = ?').get('profile-cloudrevoke-admin')
+  ).id;
+  const csrf = issueAdminCsrfToken(adminId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/cloud-token/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: adminCookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: 'tok_xyz', userId: String(targetId), csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(lastEngramCloudRequest?.url, '/admin/tokens/tok_xyz/revoke');
+});
+
+test('POST /admin/profile/cloud-token/revoke redirects with error=not_found (form client) when the account has no Cloud link', async () => {
+  const userId = insertUser({ username: 'profile-cloudrevoke-nolink', isAdmin: true, role: 'admin' });
+  const cookie = `__Host-admin_session=${createAdminSessionToken(userId, ADMIN_SECRET)}`;
+  const csrf = issueAdminCsrfToken(userId, ADMIN_SECRET);
+
+  const res = await fetch(`${baseUrl}/admin/profile/cloud-token/revoke`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      Origin: `https://monitor.${DOMAIN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ tokenId: 'tok_abc', csrf }),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(res.headers.get('location')?.includes('error=not_found'));
+});
+
 // engram-shared-projects — GET /internal/engram-grant: service-to-service
 // only (shared secret, no admin session), checked once by engram-router's
 // cold spawn path before allowing a client into a shared (non-private)

@@ -41,6 +41,8 @@ import {
   createUser as createEngramCloudUser,
   grantProject as grantEngramCloudProject,
   listGrants as listEngramCloudGrants,
+  listTokens as listEngramCloudTokens,
+  revokeCloudToken,
   issueToken as issueEngramCloudToken,
   loginDashboard as loginEngramCloudDashboard,
 } from './engram-cloud-client.js';
@@ -1719,6 +1721,8 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
   );
   /** @type {string[]} */
   let subprojects = [];
+  /** @type {any[] | null} */
+  let cloudTokens = null;
   if (linkRow) {
     try {
       const grants = await listEngramCloudGrants({ principalId: linkRow.principal_id });
@@ -1731,24 +1735,30 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
     } catch {
       // swallowed — same reasoning as the Cloud-link self-heal above
     }
+    try {
+      const result = await listEngramCloudTokens({ principalId: linkRow.principal_id });
+      // Defensive, not just optimistic: `res.writeHead(200, ...)` has
+      // already run by the time this value reaches `renderProfilePage`
+      // below, so a malformed (non-array) response here must NEVER throw
+      // downstream — a throw after headers are sent leaves `res.end()`
+      // uncalled, hanging the response forever instead of erroring
+      // cleanly (found while adding this section: a test's default stub
+      // response `{}`, not an array, reproduced exactly this hang).
+      cloudTokens = Array.isArray(result) ? result : [];
+    } catch {
+      // swallowed — a Cloud outage must never break this page; an empty
+      // list (not null) so the section still renders, just with nothing
+      // to show, distinct from "no Cloud link at all" (null, hides it).
+      cloudTokens = [];
+    }
   }
 
   let rawToken = forcedRawToken;
-  let tokenMeta;
-  if (rawToken) {
-    // The caller (regenerate) just revoked the old one and inserted this
-    // new one inside its own transaction — the active row IS this token.
-    tokenMeta = listTokensForUser(db, target.id).find((/** @type {any} */ t) => !t.revoked_at);
-  } else {
-    const existingTokens = listTokensForUser(db, target.id);
-    const activeToken = existingTokens.find((/** @type {any} */ t) => !t.revoked_at);
-    if (activeToken) {
-      tokenMeta = activeToken;
-    } else {
-      const issued = issueMcpToken(db, { userId: target.id, label: 'mcp-profile' });
-      rawToken = issued.rawToken;
-      tokenMeta = listTokensForUser(db, target.id).find((/** @type {any} */ t) => !t.revoked_at);
-    }
+  let gatewayTokens = listTokensForUser(db, target.id);
+  if (!rawToken && !gatewayTokens.some((/** @type {any} */ t) => !t.revoked_at)) {
+    const issued = issueMcpToken(db, { userId: target.id, label: 'mcp-profile' });
+    rawToken = issued.rawToken;
+    gatewayTokens = listTokensForUser(db, target.id);
   }
 
   const csrfToken = issueAdminCsrfToken(admin.id, getAdminSessionSecret());
@@ -1756,10 +1766,11 @@ async function sendProfilePage(res, db, admin, target, config, forcedRawToken = 
   res.end(
     renderProfilePage({
       target,
-      viewer: { username: admin.username, role: admin.role },
+      viewer: { username: admin.username, role: admin.role, id: admin.id },
       subprojects,
       rawToken,
-      tokenMeta,
+      gatewayTokens,
+      cloudTokens,
       mcpUrl: `https://${config.domain}/mcp/engram`,
       csrfToken,
     }),
@@ -1933,6 +1944,125 @@ async function handlePostAdminProfileRevokeToken(req, res, db, config) {
 }
 
 /**
+ * POST /admin/profile/cloud-token/revoke (mcp-profile-page) — revokes one
+ * of Engram Cloud's OWN tokens (its admin API, not auth-gateway's SQLite
+ * `tokens` table — see `renderProfileCloudTokensSection`'s doc comment for
+ * why these are shown as two separate sections). Same write guard and
+ * `resolveProfileTarget` eligibility as the gateway-token routes above.
+ *
+ * There is no local row to update, so nothing here needs a `db.transaction`
+ * (D8's "mutation + audit in one transaction" is about ONE atomic write —
+ * this action's only atomic step, the audit row itself, is still wrapped
+ * in a trivial transaction for consistency with every other write on this
+ * page). The Cloud token id (an opaque string) goes into `detail.
+ * cloudTokenId`, never `targetTokenId` (that column is this codebase's own
+ * INTEGER token ids, a different id space entirely).
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ domain: string }} config
+ */
+async function handlePostAdminProfileCloudTokenRevoke(req, res, db, config) {
+  const adminSecret = getAdminSessionSecret();
+  const admin = authenticateAdmin(db, { cookie: req.headers.cookie }, adminSecret);
+  if (!admin) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const originOk = ADMIN_LOGIN_HOSTS.some((subdomain) =>
+    isAcceptableOrigin(
+      { origin: req.headers.origin, referer: req.headers.referer },
+      { domain: `${subdomain}.${config.domain}`, strict: true },
+    ),
+  );
+  if (!originOk) {
+    sendJson(res, 403, { error: 'csrf_origin_rejected' });
+    return;
+  }
+
+  /** @type {{ isForm: boolean, data: Record<string, any> }} */
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'invalid_request_body' });
+    return;
+  }
+  const { isForm, data } = body;
+
+  const csrfToken = /** @type {string | undefined} */ (req.headers['x-csrf-token']) ?? data?.csrf;
+  if (!verifyAdminCsrfToken(csrfToken, { uid: admin.id, adminSecret })) {
+    sendJson(res, 403, { error: 'csrf_token_invalid' });
+    return;
+  }
+
+  const { tokenId, userId } = data ?? {};
+  const target = resolveProfileTarget(res, admin, userId !== undefined ? String(userId) : null, db);
+  if (!target) {
+    return;
+  }
+
+  const redirectTarget =
+    target.id === admin.id ? '/admin/profile' : `/admin/profile?userId=${target.id}`;
+
+  const linkRow = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(target.id)
+  );
+  if (!linkRow || !tokenId) {
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  try {
+    await revokeCloudToken({ tokenId: String(tokenId), reason: 'revoked via admin panel' });
+  } catch {
+    const runFailureAudit = db.transaction(() => {
+      recordAudit(db, {
+        actorUserId: admin.id,
+        actorLabel: admin.username,
+        action: 'cloud_token.revoke',
+        outcome: 'failure',
+        targetUserId: target.id,
+        detail: { cloudTokenId: String(tokenId) },
+      });
+    });
+    runFailureAudit();
+    if (isForm) {
+      res.writeHead(302, { Location: `${redirectTarget}${target.id === admin.id ? '?' : '&'}error=not_found` });
+      res.end();
+      return;
+    }
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  const runSuccessAudit = db.transaction(() => {
+    recordAudit(db, {
+      actorUserId: admin.id,
+      actorLabel: admin.username,
+      action: 'cloud_token.revoke',
+      outcome: 'success',
+      targetUserId: target.id,
+      detail: { cloudTokenId: String(tokenId) },
+    });
+  });
+  runSuccessAudit();
+
+  if (isForm) {
+    res.writeHead(302, { Location: redirectTarget });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/**
  * Dispatches every /admin/* request (D1) — a fully independent
  * authorization model from app.js's regular routes, deliberately kept in
  * its own module so the two auth models never interleave in one file.
@@ -2033,6 +2163,11 @@ export async function handleAdminRequest(req, res, db, config) {
 
   if (req.method === 'POST' && pathname === '/admin/profile/revoke-token') {
     await handlePostAdminProfileRevokeToken(req, res, db, config);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/admin/profile/cloud-token/revoke') {
+    await handlePostAdminProfileCloudTokenRevoke(req, res, db, config);
     return;
   }
 

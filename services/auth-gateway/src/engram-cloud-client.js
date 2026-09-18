@@ -128,6 +128,35 @@ export function issueToken({ principalId, name }) {
 }
 
 /**
+ * Lists every token ever issued to a principal, active and revoked
+ * (GET /admin/users/{id}/tokens) — confirmed real via deepwiki against
+ * engram's own source (`ListPrincipalTokens`/`adminTokenMetadata`), not
+ * guessed. No usage-count or client/machine/IP field exists anywhere in
+ * this shape — Cloud does not track that, so no caller of this function
+ * may claim it does.
+ * @param {{ principalId: string }} opts
+ * @returns {Promise<Array<{ id: string, principal_id: string, token_prefix: string, name: string | null, created_by_principal_id: string, created_at: string, last_used_at: string | null, revoked_at: string | null, revoked_by_principal_id: string | null, revocation_reason: string | null }>>}
+ */
+export function listTokens({ principalId }) {
+  return engramCloudRequest(`/admin/users/${encodeURIComponent(principalId)}/tokens`);
+}
+
+/**
+ * Revokes one of Cloud's own tokens (POST /admin/tokens/{id}/revoke) —
+ * distinct from this codebase's own `revokeProfileToken` (user-admin.js),
+ * which revokes a ROW in auth-gateway's own SQLite `tokens` table. This
+ * one calls Cloud's admin API instead; there is no local row to update.
+ * @param {{ tokenId: string, reason: string }} opts
+ * @returns {Promise<{ id: string, revoked_at: string }>}
+ */
+export function revokeCloudToken({ tokenId, reason }) {
+  return engramCloudRequest(`/admin/tokens/${encodeURIComponent(tokenId)}/revoke`, {
+    method: 'POST',
+    body: { reason },
+  });
+}
+
+/**
  * Logs a principal into Engram Cloud's own built-in dashboard
  * (`POST /dashboard/login`) using THAT principal's own token — never the
  * shared `ENGRAM_CLOUD_ADMIN_TOKEN` (Phase 5, per-admin SSO). Confirmed via
