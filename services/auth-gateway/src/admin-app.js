@@ -512,7 +512,15 @@ function handleGetAdminUsers(req, res, db, url) {
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   const errorCode = url.searchParams.get('error');
   res.writeHead(200, ADMIN_PAGE_HEADERS);
-  res.end(renderUsersPage({ users, adminAccounts, csrfToken, errorCode }));
+  res.end(
+    renderUsersPage({
+      users,
+      adminAccounts,
+      csrfToken,
+      errorCode,
+      viewer: { username: admin.username, role: admin.role },
+    }),
+  );
 }
 
 /**
@@ -789,7 +797,14 @@ function handleGetAdminTokens(req, res, db, url) {
   const errorCode = url.searchParams.get('error');
   res.writeHead(200, ADMIN_PAGE_HEADERS);
   res.end(
-    renderTokensPage({ username: targetUser.username, userId, tokens, csrfToken, errorCode }),
+    renderTokensPage({
+      username: targetUser.username,
+      userId,
+      tokens,
+      csrfToken,
+      errorCode,
+      viewer: { username: admin.username, role: admin.role },
+    }),
   );
 }
 
@@ -1312,7 +1327,7 @@ function handleGetAdminConsole(req, res, db, url) {
 
   const csrfToken = issueAdminCsrfToken(admin.id, adminSecret);
   res.writeHead(200, CONSOLE_PAGE_HEADERS);
-  res.end(renderConsolePage({ view, csrfToken, role: admin.role }));
+  res.end(renderConsolePage({ view, csrfToken, role: admin.role, username: admin.username }));
 }
 
 /**
@@ -1459,6 +1474,7 @@ async function handleGetEngramCloudImport(req, res, db, url) {
       principals: unlinked,
       csrfToken,
       errorCode: url.searchParams.get('error'),
+      viewer: { username: admin.username, role: admin.role },
     }),
   );
 }
@@ -1677,10 +1693,12 @@ async function handleGetAdminProfile(req, res, db, url, config) {
   if (linkRow) {
     try {
       const grants = await listEngramCloudGrants({ principalId: linkRow.principal_id });
-      const prefix = `${target.username}.`;
-      subprojects = grants
-        .filter((/** @type {any} */ g) => g.project.startsWith(prefix))
-        .map((/** @type {any} */ g) => g.project.slice(prefix.length));
+      // engram-shared-projects: a grant's `project` field is an arbitrary
+      // string, used VERBATIM as X-Engram-Subproject — no identity prefix
+      // is stripped or assumed here (an earlier version of this code did,
+      // based on the now-obsolete always-prefixed design; found live,
+      // 2026-09-18, via a profile showing zero projects for a real grant).
+      subprojects = grants.map((/** @type {any} */ g) => g.project);
     } catch {
       // swallowed — same reasoning as the Cloud-link self-heal above
     }
@@ -1702,6 +1720,7 @@ async function handleGetAdminProfile(req, res, db, url, config) {
   res.end(
     renderProfilePage({
       target,
+      viewer: { username: admin.username, role: admin.role },
       subprojects,
       rawToken,
       tokenMeta,

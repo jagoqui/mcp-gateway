@@ -17,18 +17,21 @@ export const ADMIN_PANEL_ERRORS = Object.freeze({
 });
 
 /**
- * Shared nav for every authenticated admin page: back to Users, cross-links
- * to /dashboard (Engram Cloud's own UI) and /monitor (engram-monitor) —
- * both already reachable from here without a second login, since they sit
- * behind the SAME admin session on this same host (single perimeter,
- * single login) — and a Log out form reusing the page's own admin CSRF
- * token (same uid, same admin CSRF domain — no separate token issuance
- * needed for it).
+ * Shared nav for every authenticated admin page: who is logged in (user-
+ * requested, 2026-09-18 — no page showed this before), back to Users,
+ * cross-links to /dashboard (Engram Cloud's own UI) and /monitor
+ * (engram-monitor) — both already reachable from here without a second
+ * login, since they sit behind the SAME admin session on this same host
+ * (single perimeter, single login) — and a Log out form reusing the
+ * page's own admin CSRF token (same uid, same admin CSRF domain — no
+ * separate token issuance needed for it).
  * @param {string} csrfToken
+ * @param {{ username: string, role: string }} viewer
  * @returns {string}
  */
-function renderAdminNav(csrfToken) {
+function renderAdminNav(csrfToken, viewer) {
   return `<nav class="nav">
+  <span class="note">Logged in as ${escapeHtml(viewer.username)} (${escapeHtml(viewer.role)})</span>
   <a href="/admin/users">Users</a>
   <a href="/admin/console?view=cloud">Engram Cloud dashboard</a>
   <a href="/admin/console?view=monitor">Monitor</a>
@@ -55,7 +58,7 @@ function renderAdminNav(csrfToken) {
  * @param {{ view?: string | null, csrfToken: string, role?: string }} options
  * @returns {string}
  */
-export function renderConsolePage({ view, csrfToken, role = 'admin' }) {
+export function renderConsolePage({ view, csrfToken, role = 'admin', username = '' }) {
   const isAdmin = role === 'admin';
   // Unit 3: a member only ever reaches this page for the cloud view — the
   // handler already forces it server-side (handleGetAdminConsole), so the
@@ -69,6 +72,7 @@ export function renderConsolePage({ view, csrfToken, role = 'admin' }) {
     : '';
   const body = `<div class="shell">
   <header class="shell-header">
+    <span class="note">Logged in as ${escapeHtml(username)} (${escapeHtml(role)})</span>
     ${usersLink}
     <a href="/admin/profile">Profile</a>
     <form method="post" action="/admin/logout">
@@ -152,10 +156,11 @@ function renderAdminAccountRow(account) {
  *   adminAccounts?: Array<{ id: number, username: string, role: string, created_at: string, disabled_at: string | null }>,
  *   csrfToken: string,
  *   errorCode?: string | null,
+ *   viewer: { username: string, role: string },
  * }} options
  * @returns {string}
  */
-export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCode }) {
+export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCode, viewer }) {
   const errorMessage =
     errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
       ? ADMIN_PANEL_ERRORS[errorCode]
@@ -164,7 +169,7 @@ export function renderUsersPage({ users, adminAccounts = [], csrfToken, errorCod
   const rows = users.map((user) => renderUserRow(user, csrfToken)).join('\n');
   const adminAccountRows = adminAccounts.map((account) => renderAdminAccountRow(account)).join('\n');
   const body = `<main>
-  ${renderAdminNav(csrfToken)}
+  ${renderAdminNav(csrfToken, viewer)}
   <h1>Users</h1>
   ${errorMarkup}
   <div class="table-wrap">
@@ -237,10 +242,10 @@ function renderImportRow(principal, csrfToken) {
 /**
  * GET /admin/engram-cloud/import — lists Engram Cloud principals that have
  * no local admin account yet, each with its own import form.
- * @param {{ principals: Array<{ principal_id: string, username: string, role: string }>, csrfToken: string, errorCode?: string | null }} options
+ * @param {{ principals: Array<{ principal_id: string, username: string, role: string }>, csrfToken: string, errorCode?: string | null, viewer: { username: string, role: string } }} options
  * @returns {string}
  */
-export function renderImportPage({ principals, csrfToken, errorCode }) {
+export function renderImportPage({ principals, csrfToken, errorCode, viewer }) {
   const errorMessage =
     errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
       ? ADMIN_PANEL_ERRORS[errorCode]
@@ -248,7 +253,7 @@ export function renderImportPage({ principals, csrfToken, errorCode }) {
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
   const rows = principals.map((p) => renderImportRow(p, csrfToken)).join('\n');
   const body = `<main>
-  ${renderAdminNav(csrfToken)}
+  ${renderAdminNav(csrfToken, viewer)}
   <h1>Import from Engram Cloud</h1>
   <p class="note">Engram Cloud principals with no local account yet.</p>
   ${errorMarkup}
@@ -318,10 +323,11 @@ function renderTokenRow(token, userId, csrfToken) {
  *   tokens: Array<{ id: number, label: string | null, created_at: string, last_used_at: string | null, revoked_at: string | null }>,
  *   csrfToken: string,
  *   errorCode?: string | null,
+ *   viewer: { username: string, role: string },
  * }} options
  * @returns {string}
  */
-export function renderTokensPage({ username, userId, tokens, csrfToken, errorCode }) {
+export function renderTokensPage({ username, userId, tokens, csrfToken, errorCode, viewer }) {
   const errorMessage =
     errorCode && Object.prototype.hasOwnProperty.call(ADMIN_PANEL_ERRORS, errorCode)
       ? ADMIN_PANEL_ERRORS[errorCode]
@@ -329,7 +335,7 @@ export function renderTokensPage({ username, userId, tokens, csrfToken, errorCod
   const errorMarkup = errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : '';
   const rows = tokens.map((token) => renderTokenRow(token, userId, csrfToken)).join('\n');
   const body = `<main>
-  ${renderAdminNav(csrfToken)}
+  ${renderAdminNav(csrfToken, viewer)}
   <h1>Tokens for ${escapeHtml(username)}</h1>
   <p><a href="/admin/users">Back to users</a></p>
   ${errorMarkup}
@@ -415,6 +421,7 @@ function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
  * Ctrl/Cmd+A, then copy.
  * @param {{
  *   target: { id: number, username: string, role: string },
+ *   viewer: { username: string, role: string },
  *   subprojects: string[],
  *   rawToken: string | null,
  *   tokenMeta: { id: number, label: string | null, created_at: string, last_used_at: string | null } | null,
@@ -423,7 +430,7 @@ function renderMcpConfigBlock({ mcpUrl, rawToken, subproject }) {
  * }} options
  * @returns {string}
  */
-export function renderProfilePage({ target, subprojects, rawToken, tokenMeta, mcpUrl, csrfToken }) {
+export function renderProfilePage({ target, viewer, subprojects, rawToken, tokenMeta, mcpUrl, csrfToken }) {
   const configBlocks = rawToken
     ? subprojects.map((subproject) => renderMcpConfigBlock({ mcpUrl, rawToken, subproject })).join('\n')
     : '';
@@ -451,6 +458,8 @@ export function renderProfilePage({ target, subprojects, rawToken, tokenMeta, mc
   </div>`
       : '';
   const body = `<main>
+  <p class="note">Logged in as ${escapeHtml(viewer.username)} (${escapeHtml(viewer.role)})</p>
+  ${viewer.role === 'admin' ? '<p><a href="/admin/users">Back to users</a></p>' : ''}
   <h1>Profile: ${escapeHtml(target.username)} (${escapeHtml(target.role)})</h1>
   ${rawToken ? '<p class="error">Copy this now — the token will not be shown again.</p>' : ''}
   ${configBlocks}

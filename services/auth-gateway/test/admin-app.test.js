@@ -698,12 +698,12 @@ test('GET /admin/users lists only is_admin=0 users in the regular-users table, w
   const body = await res.text();
   assert.ok(body.includes('regular-listed'));
   assert.ok(body.includes('disabled-listed'));
-  // The logged-in admin's own username now legitimately appears exactly
-  // once — in the separate "Admin panel accounts" table (below), never
-  // duplicated into the regular-users table this test is actually
-  // scoped to.
+  // The logged-in admin's own username now legitimately appears twice —
+  // once in the "Logged in as" nav banner, once in the separate "Admin
+  // panel accounts" table (below) — never in the regular-users table
+  // this test is actually scoped to (which would make it three).
   const occurrences = body.split('roles-not-in-regular-list-viewer').length - 1;
-  assert.equal(occurrences, 1);
+  assert.equal(occurrences, 2);
 });
 
 test('threat: a malicious username is HTML-escaped in the rendered users list, not live markup (A12)', async () => {
@@ -2372,13 +2372,13 @@ test('GET /admin/profile with no admin cookie returns 401', async () => {
   assert.equal(res.status, 401);
 });
 
-test('GET /admin/profile (self, member, first visit) auto-issues a token and shows a copyable config per grant matching username.*', async () => {
+test('GET /admin/profile (self, member, first visit) auto-issues a token and shows a copyable config per grant, using each grant project VERBATIM (engram-shared-projects — no prefix stripping/filtering)', async () => {
   const { cookie, userId } = insertAdminAccountWithCloudLink('profile-member-1', 'member', 'p-profile-1');
   engramCloudResponsesByRoute['GET /admin/users/p-profile-1/grants'] = {
     status: 200,
     body: [
-      { principal_id: 'p-profile-1', project: 'profile-member-1.demo-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
-      { principal_id: 'p-profile-1', project: 'someone-else.unrelated', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
+      { principal_id: 'p-profile-1', project: 'demo-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
+      { principal_id: 'p-profile-1', project: 'team-shared-project', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' },
     ],
   };
 
@@ -2386,7 +2386,7 @@ test('GET /admin/profile (self, member, first visit) auto-issues a token and sho
   assert.equal(res.status, 200);
   const body = await res.text();
   assert.ok(body.includes('demo-project'));
-  assert.ok(!body.includes('unrelated'));
+  assert.ok(body.includes('team-shared-project'));
   assert.ok(body.includes('"url": "https://jagoqui.tech/mcp/engram"') || body.includes('/mcp/engram'));
 
   const tokenRow = /** @type {any} */ (
