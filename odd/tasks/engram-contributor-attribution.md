@@ -114,9 +114,43 @@ glossed over):
 - [x] 5. Full suites green: auth-gateway 436/436, engram-router 58/58,
   both lint clean. Committed on `feat/admin-users-panel-05-admin-auth-verify`
   (not pushed — handled separately after review).
-- [ ] 6. Manual E2E on the VPS: Yenny does a real save into her own
-  default private project, confirm she appears in Cloud's Contributors
-  tab afterward (not `LEGACY_SYNC`).
+- [x] 6a. REGRESSION found and fixed live on the VPS, same day as
+  deploying task 5: after deploying, Yenny did a real save test — it
+  succeeded locally but never appeared in Cloud's Contributors tab, or
+  ANYWHERE in Cloud's own data. Root-caused via direct read-only Postgres
+  forensics against the live `engram-cloud-db` container (not guessed):
+  `cloud_mutations`/`cloud_chunks` both stopped receiving ANY new row,
+  for ANY identity (not just Yenny), at the exact moment of the task-5
+  redeploy — `cloud_project_grants` had exactly ONE row (the pre-existing
+  shared project), zero grants for anyone's own private project.
+  Confirmed via deepwiki: Cloud's managed-token auth for `POST
+  /sync/mutations/push` is deny-by-default — a managed (per-principal)
+  token can only sync a project its principal has been explicitly
+  granted, even that principal's OWN identity-named private default. The
+  legacy shared `ENGRAM_CLOUD_TOKEN` used before task 5 had a completely
+  DIFFERENT authorization model (`ENGRAM_CLOUD_ALLOWED_PROJECTS` env
+  allowlist), so nobody had ever needed a grant for their own space —
+  task 5's token swap silently broke that assumption for every identity
+  at once, not just new ones.
+  Fixed: `ensureEngramCloudLink` (admin-app.js) now self-grants the
+  freshly linked principal its own identity-named project right after
+  issuing its token — best-effort/swallowed (a transient grant failure
+  must never block SSO login or the profile page, same as every other
+  Cloud call in this function). 2 new tests: the self-grant call is made
+  with the right project name; SSO still succeeds end-to-end even when
+  the self-grant call itself fails. 437/437 full suite, lint clean.
+- [x] 6b. BACKFILL (operational, not code): the 4 identities already
+  linked BEFORE this fix (jagoqui, admin, Yenny, resilience-test-temp)
+  never got this self-grant automatically — `ensureEngramCloudLink`'s
+  `existing` short-circuit means it never re-runs for an already-linked
+  principal, so the fix alone doesn't retroactively unblock them. Granted
+  each their own identity-named project directly via Cloud's admin API
+  on the VPS, one-time, so they resume syncing immediately without
+  waiting to be unlinked/relinked.
+- [ ] 6c. Manual E2E on the VPS: Yenny does a FRESH real save into her
+  own default private project (after the backfill), confirm it now shows
+  up in Cloud's `cloud_mutations`/dashboard Contributors as "Yenny", not
+  `LEGACY_SYNC` and not silently dropped.
 
 ## Progress Notes
 

@@ -1999,6 +1999,17 @@ test('GET /admin/engram-cloud/sso with no stored credential provisions one (crea
     role: 'admin',
   });
 
+  // engram-contributor-attribution (fix, 2026-09-18): Cloud's own
+  // managed-token auth is deny-by-default for /sync/mutations/push — a
+  // freshly linked principal must be self-granted its own identity-named
+  // project, or its private default space can never sync once it
+  // authenticates with its OWN token instead of the old shared one.
+  const selfGrantCall = engramCloudRequestLog.find(
+    (r) => r.url === '/admin/users/p-sso-1/grants',
+  );
+  assert.equal(selfGrantCall.method, 'POST');
+  assert.deepEqual(JSON.parse(selfGrantCall.body), { project: 'sso-first-time-admin' });
+
   const loginCall = engramCloudRequestLog.find((r) => r.url === '/dashboard/login');
   assert.equal(loginCall.body, 'token=freshly-issued-token');
 
@@ -2047,6 +2058,33 @@ test('GET /admin/engram-cloud/sso surfaces a clean error when provisioning fails
   assert.equal(res.status, 502);
   const body = /** @type {any} */ (await res.json());
   assert.equal(body.error, 'engram_cloud_sso_failed');
+});
+
+test('GET /admin/engram-cloud/sso still succeeds even when the self-grant call itself fails (best-effort, never blocks SSO)', async () => {
+  const { cookie } = loginAsAdmin('sso-selfgrant-fails-admin');
+  engramCloudResponsesByRoute['POST /admin/users'] = {
+    status: 201,
+    body: { principal_id: 'p-sso-2', username: 'sso-selfgrant-fails-admin', role: 'admin' },
+  };
+  engramCloudResponsesByRoute['POST /admin/users/p-sso-2/tokens'] = {
+    status: 201,
+    body: { raw_token: 'freshly-issued-token', token: { id: 't1', principal_id: 'p-sso-2' } },
+  };
+  engramCloudResponsesByRoute['POST /admin/users/p-sso-2/grants'] = {
+    status: 500,
+    body: { error: 'boom' },
+  };
+  engramCloudResponsesByRoute['POST /dashboard/login'] = {
+    status: 303,
+    headers: { Location: '/dashboard/', 'Set-Cookie': 'engram_dashboard_token=xyz; Path=/dashboard' },
+  };
+
+  const res = await fetch(`${baseUrl}/admin/engram-cloud/sso`, {
+    headers: { Cookie: cookie },
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), '/dashboard');
 });
 
 test('a regular (non-admin) session cookie never authenticates GET /admin/engram-cloud/sso', async () => {

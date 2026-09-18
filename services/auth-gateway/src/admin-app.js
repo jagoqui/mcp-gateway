@@ -1398,6 +1398,28 @@ async function ensureEngramCloudLink(db, admin) {
     principalId: created.principal_id,
     token: issued.raw_token,
   });
+
+  // engram-contributor-attribution (fix, 2026-09-18): Cloud's OWN
+  // managed-token auth for POST /sync/mutations/push is deny-by-default —
+  // a principal can only sync a project it's been explicitly granted,
+  // even its own identity-named private default. Before this session's
+  // per-identity-token change, every child spawned with the ONE shared
+  // legacy ENGRAM_CLOUD_TOKEN, authorized via Cloud's separate
+  // ENGRAM_CLOUD_ALLOWED_PROJECTS allowlist instead — nobody ever needed
+  // a grant for their own space. Now that each identity authenticates
+  // with its OWN managed token, it needs its own self-grant or its
+  // private default silently stops syncing (found live: confirmed via a
+  // direct Postgres check that cloud_mutations/cloud_chunks received
+  // zero new rows for ANYONE since the per-identity-token deploy).
+  // Best-effort (swallowed): a transient grant failure must never break
+  // SSO login or the profile page, same reasoning as every other Cloud
+  // call in this function's callers.
+  try {
+    await grantEngramCloudProject({ principalId: created.principal_id, project: admin.username });
+  } catch {
+    // swallowed
+  }
+
   return issued.raw_token;
 }
 
