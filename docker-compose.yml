@@ -62,6 +62,13 @@ services:
       # "Post-Implementation Correction".
       ENGRAM_CLOUD_ADMIN_TOKEN: ${ENGRAM_CLOUD_ADMIN_TOKEN}
       ENGRAM_CLOUD_SERVER: http://engram-cloud:18080
+      # Shared secret gating GET /internal/engram-grant — a
+      # service-to-service-only route (never routed through Caddy)
+      # engram-router calls on its cold spawn path to check whether a
+      # requested SHARED (non-identity-private) Engram project is
+      # actually grant-authorized for the caller. See
+      # odd/tasks/engram-shared-projects.md.
+      ENGRAM_ROUTER_INTERNAL_SECRET: ${ENGRAM_ROUTER_INTERNAL_SECRET}
     volumes:
       - auth_gateway_data:/data
     networks:
@@ -131,10 +138,18 @@ services:
       ENGRAM_CLOUD_SERVER: http://engram-cloud:18080
       MAX_ENGRAM_CHILDREN: ${MAX_ENGRAM_CHILDREN:-20}
       ENGRAM_ROUTER_PORT_BASE: "19100"
+      # Same shared secret as auth-gateway's own copy above — lets this
+      # service call GET /internal/engram-grant on its cold spawn path,
+      # to grant-check a requested shared (non-identity-private)
+      # project before enrolling/spawning a child for it. See
+      # odd/tasks/engram-shared-projects.md.
+      ENGRAM_ROUTER_INTERNAL_SECRET: ${ENGRAM_ROUTER_INTERNAL_SECRET}
+      AUTH_GATEWAY_INTERNAL_URL: http://auth-gateway:3000
     networks:
       - gateway
     depends_on:
       - engram-cloud
+      - auth-gateway
     expose:
       - "9000"
     volumes:

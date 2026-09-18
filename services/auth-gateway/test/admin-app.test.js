@@ -12,11 +12,13 @@ import http from 'node:http';
 const DOMAIN = 'test.example';
 const SESSION_SECRET = 'test-session-secret';
 const ADMIN_SECRET = 'test-admin-session-secret';
+const INTERNAL_SECRET = 'test-engram-router-internal-secret';
 
 before(() => {
   process.env.ATLASSIAN_ENC_KEY = crypto.randomBytes(32).toString('base64');
   process.env.AUTH_GATEWAY_SESSION_SECRET = SESSION_SECRET;
   process.env.AUTH_GATEWAY_ADMIN_SESSION_SECRET = ADMIN_SECRET;
+  process.env.ENGRAM_ROUTER_INTERNAL_SECRET = INTERNAL_SECRET;
 });
 
 /** @type {import('better-sqlite3').Database} */
@@ -2478,4 +2480,71 @@ test('POST /admin/profile/regenerate-token with a userId for another account is 
     body: new URLSearchParams({ tokenId: '1', userId: String(otherId), csrf }),
   });
   assert.equal(res.status, 403);
+});
+
+// engram-shared-projects — GET /internal/engram-grant: service-to-service
+// only (shared secret, no admin session), checked once by engram-router's
+// cold spawn path before allowing a client into a shared (non-private)
+// project.
+
+test('GET /internal/engram-grant with no/wrong secret returns 401, stub never hit', async () => {
+  const res1 = await fetch(`${baseUrl}/internal/engram-grant?identity=x&project=y`);
+  assert.equal(res1.status, 401);
+  const res2 = await fetch(`${baseUrl}/internal/engram-grant?identity=x&project=y`, {
+    headers: { 'X-Internal-Secret': 'wrong-secret' },
+  });
+  assert.equal(res2.status, 401);
+  assert.equal(lastEngramCloudRequest, undefined);
+});
+
+test('GET /internal/engram-grant returns granted:true when the identity has an exact grant for that bare project', async () => {
+  insertAdminAccountWithCloudLink('grant-check-identity-1', 'admin', 'p-grant-1');
+  engramCloudResponsesByRoute['GET /admin/users/p-grant-1/grants'] = {
+    status: 200,
+    body: [{ principal_id: 'p-grant-1', project: 'shared-project-alpha', granted_by_principal_id: 'p-admin', created_at: '2026-01-01T00:00:00Z' }],
+  };
+
+  const res = await fetch(
+    `${baseUrl}/internal/engram-grant?identity=grant-check-identity-1&project=shared-project-alpha`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal(res.status, 200);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.granted, true);
+});
+
+test('GET /internal/engram-grant returns granted:false when no such grant exists', async () => {
+  insertAdminAccountWithCloudLink('grant-check-identity-2', 'admin', 'p-grant-2');
+  engramCloudResponsesByRoute['GET /admin/users/p-grant-2/grants'] = { status: 200, body: [] };
+
+  const res = await fetch(
+    `${baseUrl}/internal/engram-grant?identity=grant-check-identity-2&project=nope`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal(res.status, 200);
+  const body = /** @type {any} */ (await res.json());
+  assert.equal(body.granted, false);
+});
+
+test('GET /internal/engram-grant returns granted:false (fail closed) for an unknown identity, or one with no Cloud link, or an unreachable Cloud', async () => {
+  const unknown = await fetch(
+    `${baseUrl}/internal/engram-grant?identity=no-such-user&project=x`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal((/** @type {any} */ (await unknown.json())).granted, false);
+
+  insertUser({ username: 'grant-check-no-link', role: 'admin' });
+  const noLink = await fetch(
+    `${baseUrl}/internal/engram-grant?identity=grant-check-no-link&project=x`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal((/** @type {any} */ (await noLink.json())).granted, false);
+
+  insertAdminAccountWithCloudLink('grant-check-cloud-down', 'admin', 'p-grant-3');
+  await engramCloudStub.close();
+  const cloudDown = await fetch(
+    `${baseUrl}/internal/engram-grant?identity=grant-check-cloud-down&project=x`,
+    { headers: { 'X-Internal-Secret': INTERNAL_SECRET } },
+  );
+  assert.equal((/** @type {any} */ (await cloudDown.json())).granted, false);
 });

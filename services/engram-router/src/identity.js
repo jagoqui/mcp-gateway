@@ -37,19 +37,29 @@ export function deriveIdentity(headers) {
 }
 
 /**
- * Derives the final Engram project: the trusted identity, optionally
- * suffixed with a client-supplied sub-project (X-Engram-Subproject) so one
- * gateway user can separate memories per repo without any VPS-side config
- * per project. The identity ALWAYS prefixes the result — a subproject can
- * never stand alone or collide with another user's namespace, no matter
- * what value the client sends. The join uses a single literal `.` — never
- * collapsed by engram's own normalization, and unambiguous BECAUSE neither
- * identity nor subproject can contain a dot (IDENTITY_PATTERN forbids it).
- * An invalid/malformed subproject is silently dropped (falls back to the
- * bare identity) rather than rejecting the whole request: it is not a
- * trust boundary the way the identity itself is.
+ * Derives the requested Engram project (engram-shared-projects, replacing
+ * the earlier always-prefixed design — see git history for that version
+ * and why it changed). `X-Engram-Subproject`, when present and valid, now
+ * names a SHARED, bare project directly — no identity prefix — because
+ * real-time collaboration across identities was the whole point; access
+ * to it is gated by an actual Engram Cloud grant, checked elsewhere
+ * (process-manager.js's getOrCreateChild, NOT here — this function has no
+ * way to check grants and must stay a pure, synchronous, testable string
+ * decision). No subproject header at all still means the private,
+ * always-available identity-scoped default (`isShared: false`) — zero
+ * grant, zero admin setup, exactly as before. An invalid/malformed
+ * subproject falls back to that same private default rather than
+ * rejecting the request: it is not a trust boundary the way identity
+ * itself is.
+ *
+ * Known consequence, deliberately accepted (see
+ * odd/tasks/engram-shared-projects.md): a shared project's bare name can
+ * collide with another identity's own private default (e.g. someone
+ * granted a project literally named "yenny-fernanda" lands in the exact
+ * same project as identity "yenny-fernanda"'s own private space). Never
+ * grant a shared project a name matching a real gateway username.
  * @param {Record<string, unknown>} headers
- * @returns {string | null} the final project, or null if the identity itself is absent/invalid
+ * @returns {{ identity: string, project: string, isShared: boolean } | null} null if the identity itself is absent/invalid
  */
 export function deriveProject(headers) {
   const identity = deriveIdentity(headers);
@@ -58,7 +68,7 @@ export function deriveProject(headers) {
   }
   const subproject = headers?.['x-engram-subproject'];
   if (typeof subproject !== 'string' || !IDENTITY_PATTERN.test(subproject)) {
-    return identity;
+    return { identity, project: identity, isShared: false };
   }
-  return `${identity}.${subproject}`;
+  return { identity, project: subproject, isShared: true };
 }

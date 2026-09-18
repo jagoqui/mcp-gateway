@@ -6,6 +6,13 @@ const DEFAULT_READY_TIMEOUT_MS = 5000;
 const DEFAULT_READY_INTERVAL_MS = 50;
 
 /**
+ * Thrown by getOrCreateChild when a SHARED (isShared: true) request has no
+ * matching Engram Cloud grant (engram-shared-projects) — app.js maps this
+ * to a distinct 403, never conflated with the existing capacity 503.
+ */
+export class GrantDeniedError extends Error {}
+
+/**
  * Polls 127.0.0.1:<port> with a raw TCP connect until something accepts the
  * connection, or throws once timeoutMs elapses. supergateway/engram mcp
  * need real startup time after spawn; proxying to a not-yet-listening port
@@ -120,11 +127,26 @@ export function realEnrollProject({ project, env }) {
 }
 
 /**
+ * Default checkGrant — must never be silently reachable in production
+ * (bin/engram-router.js always injects the real HTTP-calling one); a
+ * private (isShared: false) request never calls this at all, so any
+ * caller relying on that path is unaffected. Throwing loudly here (never
+ * a silent `false`) turns "someone forgot to wire checkGrant for a shared
+ * path" into an immediate, obvious failure instead of an always-denied
+ * shared project that looks like a grants bug.
+ * @returns {Promise<boolean>}
+ */
+async function unconfiguredCheckGrant() {
+  throw new Error('engram-router: checkGrant is not configured');
+}
+
+/**
  * @param {{
  *   maxChildren: number,
  *   portAllocatorOptions: { base: number, max: number },
  *   cloudToken: string,
  *   cloudServer: string,
+ *   checkGrant?: (opts: { identity: string, project: string }) => Promise<boolean>,
  *   spawnChild?: (opts: { identity: string, port: number, env: Record<string, string> }) => any,
  *   enrollProject?: (opts: { project: string, env: Record<string, string> }) => Promise<void>,
  *   waitUntilReady?: (port: number, options?: { timeoutMs?: number, intervalMs?: number }) => Promise<void>,
@@ -137,6 +159,7 @@ export function createProcessManager({
   portAllocatorOptions,
   cloudToken,
   cloudServer,
+  checkGrant = unconfiguredCheckGrant,
   spawnChild = realSpawnChild,
   enrollProject = realEnrollProject,
   waitUntilReady: waitForReady = waitUntilReady,
@@ -147,9 +170,9 @@ export function createProcessManager({
   /** @type {Map<string, { child: any, port: number }>} */
   const children = new Map();
 
-  function buildEnv(identity) {
+  function buildEnv(project) {
     return {
-      ENGRAM_PROJECT: identity,
+      ENGRAM_PROJECT: project,
       ENGRAM_CLOUD_AUTOSYNC: '1',
       ENGRAM_CLOUD_TOKEN: cloudToken,
       ENGRAM_CLOUD_SERVER: cloudServer,
@@ -157,17 +180,30 @@ export function createProcessManager({
   }
 
   /**
-   * @param {string} identity
+   * @param {string} project
+   * @param {{ identity?: string, isShared?: boolean }} [meta] engram-shared-projects: `identity` and `isShared` are only ever read when `isShared` is true (the grant-check path) — a private request needs neither.
    * @returns {Promise<{ port: number }>}
    */
-  async function getOrCreateChild(identity) {
-    const existing = children.get(identity);
+  async function getOrCreateChild(project, meta = {}) {
+    const { identity, isShared = false } = meta;
+    const existing = children.get(project);
     if (existing && isHealthy(existing.child)) {
       return { port: existing.port };
     }
     if (existing && !isHealthy(existing.child)) {
       portAllocator.release(existing.port);
-      children.delete(identity);
+      children.delete(project);
+    }
+
+    // Grant check ONCE, on this cold path only — a live/cached child above
+    // is reused without ever re-checking (engram-shared-projects).
+    if (isShared) {
+      const granted = await checkGrant({ identity, project });
+      if (!granted) {
+        throw new GrantDeniedError(
+          `engram-router: "${identity}" has no grant for shared project "${project}"`,
+        );
+      }
     }
 
     if (children.size >= maxChildren) {
@@ -179,9 +215,9 @@ export function createProcessManager({
       throw new Error('engram-router: at capacity (port range exhausted)');
     }
 
-    const env = buildEnv(identity);
+    const env = buildEnv(project);
     try {
-      await enrollProject({ project: identity, env });
+      await enrollProject({ project, env });
     } catch (err) {
       // Never spawn (or occupy a map slot) for a project that failed to
       // enroll — a retry must be able to attempt enrollment fresh.
@@ -189,16 +225,16 @@ export function createProcessManager({
       throw err;
     }
 
-    const child = spawnChild({ identity, port, env });
-    children.set(identity, { child, port });
+    const child = spawnChild({ identity: project, port, env });
+    children.set(project, { child, port });
 
     try {
       await waitForReady(port, { timeoutMs: readyTimeoutMs, intervalMs: readyIntervalMs });
     } catch (err) {
       // Never leave a never-became-ready entry occupying a map slot / port —
       // a retry (by this caller or another) must be able to attempt a fresh
-      // spawn instead of being told the identity already has a child.
-      children.delete(identity);
+      // spawn instead of being told the project already has a child.
+      children.delete(project);
       portAllocator.release(port);
       throw err;
     }

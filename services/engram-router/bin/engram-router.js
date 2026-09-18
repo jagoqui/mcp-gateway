@@ -1,10 +1,12 @@
 import { createServer } from '../src/app.js';
 import { createProcessManager } from '../src/process-manager.js';
+import { createGrantChecker } from '../src/grant-client.js';
 
 const DEFAULT_PORT = 9000;
 const DEFAULT_PORT_BASE = 19100;
 const DEFAULT_MAX_CHILDREN = 20;
 const DEFAULT_CLOUD_SERVER = 'http://engram-cloud:18080';
+const DEFAULT_AUTH_GATEWAY_INTERNAL_URL = 'http://auth-gateway:3000';
 
 /**
  * @param {string} name
@@ -30,6 +32,13 @@ function main() {
     // proposal.md's Approach section for why. Never logged.
     cloudToken: requiredEnv('ENGRAM_CLOUD_TOKEN'),
     cloudServer: process.env.ENGRAM_CLOUD_SERVER || DEFAULT_CLOUD_SERVER,
+    // engram-shared-projects: required, no silent default — a shared
+    // (isShared: true) request must never be reachable with grant
+    // checking unconfigured.
+    checkGrant: createGrantChecker({
+      baseUrl: process.env.AUTH_GATEWAY_INTERNAL_URL || DEFAULT_AUTH_GATEWAY_INTERNAL_URL,
+      secret: requiredEnv('ENGRAM_ROUTER_INTERNAL_SECRET'),
+    }),
   });
 
   const server = createServer(processManager);

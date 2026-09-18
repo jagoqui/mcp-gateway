@@ -14,12 +14,15 @@ function startBackend(handler) {
   });
 }
 
-function makeStubProcessManager(resolvedPort, { reject } = {}) {
+function makeStubProcessManager(resolvedPort, { reject, rejectWith } = {}) {
   const calls = [];
   return {
     calls,
-    getOrCreateChild(identity) {
-      calls.push(identity);
+    getOrCreateChild(project) {
+      calls.push(project);
+      if (rejectWith) {
+        return Promise.reject(rejectWith);
+      }
       if (reject) {
         return Promise.reject(new Error('engram-router: at capacity'));
       }
@@ -61,7 +64,7 @@ test('request with valid identity is proxied to the resolved child port', async 
   backend.close();
 });
 
-test('a subproject header combines with identity before reaching the process manager', async () => {
+test('a subproject header now reaches the process manager as a BARE project (engram-shared-projects — no more identity prefix)', async () => {
   const backend = await startBackend((req, res) => res.end('ok'));
   const pm = makeStubProcessManager(backend.port);
   const server = createServer(pm);
@@ -72,10 +75,26 @@ test('a subproject header combines with identity before reaching the process man
     headers: { 'x-gateway-user': 'jagoqui', 'x-engram-subproject': 'skills-registry' },
   });
 
-  assert.deepEqual(pm.calls, ['jagoqui.skills-registry']);
+  assert.deepEqual(pm.calls, ['skills-registry']);
 
   server.close();
   backend.close();
+});
+
+test('a GrantDeniedError from the process manager surfaces as 403, distinct from the capacity 503', async () => {
+  const { GrantDeniedError } = await import('../src/process-manager.js');
+  const pm = makeStubProcessManager(9999, { rejectWith: new GrantDeniedError('no grant') });
+  const server = createServer(pm);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const routerPort = /** @type {any} */ (server.address()).port;
+
+  const response = await fetch(`http://127.0.0.1:${routerPort}/mcp/engram`, {
+    headers: { 'x-gateway-user': 'jagoqui', 'x-engram-subproject': 'team-alpha' },
+  });
+
+  assert.equal(response.status, 403);
+
+  server.close();
 });
 
 test('request with missing identity is rejected before touching the process manager', async () => {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { createProcessManager } from '../src/process-manager.js';
+import { createProcessManager, GrantDeniedError } from '../src/process-manager.js';
 
 // Every existing test below spawns a fake child that never actually listens
 // on its allocated port — inject a no-op readiness check so they stay fast
@@ -297,4 +297,110 @@ test('a failed enrollment rejects getOrCreateChild without spawning, and leaves 
   });
   await pm2.getOrCreateChild('jagoqui');
   assert.equal(secondSpawnCalled, true);
+});
+
+// engram-shared-projects — a request with isShared:true must be grant-
+// checked ONCE, on the cold (not-yet-cached) path only, before enrolling
+// or spawning anything. A private (isShared: false/omitted) request never
+// calls checkGrant at all — the default checkGrant below throws if ever
+// invoked, so any test above still passing unchanged proves that.
+
+test('a shared request with no grant is rejected with GrantDeniedError, before enrolling or spawning', async () => {
+  const { spawnChild, calls: spawnCalls } = makeStubSpawner();
+  let enrollCalled = false;
+  const enrollProject = async () => {
+    enrollCalled = true;
+  };
+  const checkGrant = async () => false;
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 't',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject,
+    checkGrant,
+    waitUntilReady: noWait,
+  });
+
+  await assert.rejects(
+    () => pm.getOrCreateChild('team-alpha', { identity: 'jagoqui', isShared: true }),
+    (err) => {
+      assert.ok(err instanceof GrantDeniedError);
+      return true;
+    },
+  );
+  assert.equal(enrollCalled, false);
+  assert.equal(spawnCalls.length, 0);
+});
+
+test('a shared request WITH a grant enrolls and spawns normally', async () => {
+  const { spawnChild, calls: spawnCalls } = makeStubSpawner();
+  const checkGrantCalls = [];
+  const checkGrant = async (opts) => {
+    checkGrantCalls.push(opts);
+    return true;
+  };
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 't',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    checkGrant,
+    waitUntilReady: noWait,
+  });
+
+  const result = await pm.getOrCreateChild('team-alpha', { identity: 'jagoqui', isShared: true });
+
+  assert.equal(typeof result.port, 'number');
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(checkGrantCalls, [{ identity: 'jagoqui', project: 'team-alpha' }]);
+});
+
+test('a cached (already-spawned) shared project skips the grant check on later requests', async () => {
+  const { spawnChild } = makeStubSpawner();
+  let checkGrantCallCount = 0;
+  const checkGrant = async () => {
+    checkGrantCallCount += 1;
+    return true;
+  };
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 't',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    checkGrant,
+    waitUntilReady: noWait,
+  });
+
+  await pm.getOrCreateChild('team-alpha', { identity: 'jagoqui', isShared: true });
+  await pm.getOrCreateChild('team-alpha', { identity: 'jagoqui', isShared: true });
+
+  assert.equal(checkGrantCallCount, 1);
+});
+
+test('a private request (isShared omitted or false) never calls checkGrant at all', async () => {
+  const { spawnChild } = makeStubSpawner();
+
+  const pm = createProcessManager({
+    maxChildren: 5,
+    portAllocatorOptions: { base: 19100, max: 5 },
+    cloudToken: 't',
+    cloudServer: 's',
+    spawnChild,
+    enrollProject: noEnroll,
+    waitUntilReady: noWait,
+    // No checkGrant injected at all — the real default must never be
+    // reached by a private request, or this test itself would throw.
+  });
+
+  const result = await pm.getOrCreateChild('jagoqui');
+  assert.equal(typeof result.port, 'number');
 });

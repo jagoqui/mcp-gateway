@@ -11,6 +11,7 @@ import { verifyCsrfToken, issueCsrfToken, isAcceptableOrigin } from './csrf.js';
 import { PAGE_HEADERS } from './html.js';
 import { renderLoginPage, sanitizeNext } from './login-page.js';
 import { renderPanel } from './panel.js';
+import { listGrants as listEngramCloudGrants } from './engram-cloud-client.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_DOMAIN = 'jagoqui.tech';
@@ -575,6 +576,69 @@ function handleCredentialsPanel(req, res, db, config, url) {
 }
 
 /**
+ * Resolves whether `identity` (a `users.username`) has an Engram Cloud
+ * grant for the exact bare `project` name (engram-shared-projects).
+ * Fails closed (false) on every "cannot determine" case — unknown
+ * identity, no linked Cloud principal, or Cloud itself unreachable —
+ * never treats "I couldn't check" as "allowed".
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ identity: string, project: string }} opts
+ * @returns {Promise<boolean>}
+ */
+async function resolveEngramGrant(db, { identity, project }) {
+  const user = /** @type {any} */ (
+    db.prepare('SELECT id FROM users WHERE username = ?').get(identity)
+  );
+  if (!user) {
+    return false;
+  }
+  const link = /** @type {any} */ (
+    db.prepare('SELECT principal_id FROM engram_cloud_credentials WHERE user_id = ?').get(user.id)
+  );
+  if (!link) {
+    return false;
+  }
+  try {
+    const grants = await listEngramCloudGrants({ principalId: link.principal_id });
+    return grants.some((/** @type {any} */ g) => g.project === project);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * GET /internal/engram-grant?identity=&project= (engram-shared-projects)
+ * — service-to-service only, NEVER routed through Caddy to the public
+ * internet (Docker-network-reachable only, same as auth-gateway calling
+ * engram-cloud:18080 directly elsewhere in this stack). Shared-secret
+ * gated (`X-Internal-Secret`, `ENGRAM_ROUTER_INTERNAL_SECRET`) instead
+ * of an admin session — the caller is engram-router's own process, not
+ * a browser. Checked once by engram-router's cold spawn path before
+ * admitting a client into a shared (non-identity-private) project.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('better-sqlite3').Database} db
+ * @param {URL} url
+ */
+async function handleInternalEngramGrant(req, res, db, url) {
+  const secret = process.env.ENGRAM_ROUTER_INTERNAL_SECRET;
+  if (!secret || req.headers['x-internal-secret'] !== secret) {
+    sendJson(res, 401, { error: 'unauthenticated' });
+    return;
+  }
+
+  const identity = url.searchParams.get('identity');
+  const project = url.searchParams.get('project');
+  if (!identity || !project) {
+    sendJson(res, 400, { error: 'invalid_request' });
+    return;
+  }
+
+  const granted = await resolveEngramGrant(db, { identity, project });
+  sendJson(res, 200, { granted });
+}
+
+/**
  * Runs an async route handler, converting any uncaught rejection into a
  * generic 500 response instead of letting it crash the process. Shared by
  * every POST route so each handler only needs to worry about its own
@@ -653,6 +717,11 @@ export function createApp(db, appConfig = {}) {
 
     if (req.method === 'GET' && pathname === '/credentials') {
       handleCredentialsPanel(req, res, db, config, url);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/internal/engram-grant') {
+      runAsyncHandler(handleInternalEngramGrant(req, res, db, url), res);
       return;
     }
 

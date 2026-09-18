@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { deriveProject } from './identity.js';
+import { GrantDeniedError } from './process-manager.js';
 
 /**
  * @param {import('node:http').ServerResponse} res
@@ -39,21 +40,31 @@ function proxyTo(req, res, port) {
 }
 
 /**
- * @param {{ getOrCreateChild: (identity: string) => Promise<{ port: number }> }} processManager
+ * @param {{ getOrCreateChild: (project: string, meta?: { identity?: string, isShared?: boolean }) => Promise<{ port: number }> }} processManager
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
 export function createApp(processManager) {
   return function requestListener(req, res) {
-    const project = deriveProject(req.headers);
-    if (project === null) {
+    const resolved = deriveProject(req.headers);
+    if (resolved === null) {
       sendJson(res, 401, { error: 'unauthenticated' });
       return;
     }
 
-    processManager.getOrCreateChild(project).then(
-      ({ port }) => proxyTo(req, res, port),
-      (err) => sendJson(res, 503, { error: 'capacity', message: err.message }),
-    );
+    processManager
+      .getOrCreateChild(resolved.project, { identity: resolved.identity, isShared: resolved.isShared })
+      .then(
+        ({ port }) => proxyTo(req, res, port),
+        (err) => {
+          // engram-shared-projects: a denied grant is a distinct 403, never
+          // conflated with the pre-existing capacity 503.
+          if (err instanceof GrantDeniedError) {
+            sendJson(res, 403, { error: 'grant_required' });
+            return;
+          }
+          sendJson(res, 503, { error: 'capacity', message: err.message });
+        },
+      );
   };
 }
 

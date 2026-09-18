@@ -61,19 +61,27 @@ test('a leading or trailing separator is rejected', () => {
   assert.equal(deriveIdentity({ 'x-gateway-user': 'jagoqui-' }), null);
 });
 
-// deriveProject layers an OPTIONAL client-supplied sub-project onto the
-// trusted identity — never a replacement for it. The identity always
-// prefixes the final project, so one user can never collide with or read
-// another user's namespace no matter what they put in the header.
+// engram-shared-projects (2026-09-18): deriveProject's contract changed —
+// X-Engram-Subproject no longer joins onto the identity ("identity.sub").
+// It now names a SHARED, bare, unprefixed project outright — collaboration
+// across identities is the whole point, gated by an actual Engram Cloud
+// grant (checked by process-manager.js, not here). No header at all still
+// means the private, always-available identity-scoped default, with no
+// grant check ever required for it. deriveProject now returns
+// { identity, project, isShared } instead of a bare string.
 
-test('deriveProject with no subproject header returns the bare identity (backward compatible)', () => {
-  assert.equal(deriveProject({ 'x-gateway-user': 'jagoqui' }), 'jagoqui');
+test('deriveProject with no subproject header returns the private identity-scoped default, isShared: false', () => {
+  assert.deepEqual(deriveProject({ 'x-gateway-user': 'jagoqui' }), {
+    identity: 'jagoqui',
+    project: 'jagoqui',
+    isShared: false,
+  });
 });
 
-test('deriveProject with a valid subproject header combines identity.subproject', () => {
-  assert.equal(
+test('deriveProject with a valid subproject header returns that BARE project (no identity prefix), isShared: true', () => {
+  assert.deepEqual(
     deriveProject({ 'x-gateway-user': 'jagoqui', 'x-engram-subproject': 'skills-registry' }),
-    'jagoqui.skills-registry',
+    { identity: 'jagoqui', project: 'skills-registry', isShared: true },
   );
 });
 
@@ -81,37 +89,30 @@ test('deriveProject rejects the whole request when identity itself is missing/in
   assert.equal(deriveProject({ 'x-engram-subproject': 'skills-registry' }), null);
 });
 
-test('deriveProject falls back to the bare identity when the subproject header is invalid, rather than rejecting the request', () => {
-  assert.equal(
+test('deriveProject falls back to the private identity-scoped default when the subproject header is invalid, rather than rejecting the request', () => {
+  assert.deepEqual(
     deriveProject({ 'x-gateway-user': 'jagoqui', 'x-engram-subproject': '../../etc/passwd' }),
-    'jagoqui',
+    { identity: 'jagoqui', project: 'jagoqui', isShared: false },
   );
-  assert.equal(
+  assert.deepEqual(
     deriveProject({ 'x-gateway-user': 'jagoqui', 'x-engram-subproject': '' }),
-    'jagoqui',
+    { identity: 'jagoqui', project: 'jagoqui', isShared: false },
   );
 });
 
-test("deriveProject never lets a subproject value alone collide with another user's bare identity", () => {
-  // Alice setting X-Engram-Subproject to literally "bob" must never produce
-  // plain "bob" — it always stays prefixed under alice's own identity.
+test('a subproject value can now equal another identity — this is the point (shared collaboration), gated by the grant check elsewhere, not by this function', () => {
   const result = deriveProject({ 'x-gateway-user': 'alice', 'x-engram-subproject': 'bob' });
-  assert.equal(result, 'alice.bob');
-  assert.notEqual(result, 'bob');
+  assert.deepEqual(result, { identity: 'alice', project: 'bob', isShared: true });
 });
 
-test("a bare identity and identity+subproject can never collide after engram's own normalization", () => {
-  // engram lowercases and collapses runs of consecutive "-"/"_" — it does
-  // NOT collapse dots. "yenny-fernanda" (bare) and "yenny"+"fernanda"
-  // (joined) are provably distinct strings post-normalization because the
-  // join always contains exactly one "." that neither identity nor
-  // subproject can ever themselves contain.
-  const bareCompoundIdentity = deriveProject({ 'x-gateway-user': 'yenny-fernanda' });
-  const identityPlusSubproject = deriveProject({
-    'x-gateway-user': 'yenny',
-    'x-engram-subproject': 'fernanda',
+test('a bare private identity and a same-named shared project are the SAME project string now — deliberate: a shared project can reuse anyone\'s username as its name, the grant check is the only thing gating access to it, not the string itself', () => {
+  const privateDefault = deriveProject({ 'x-gateway-user': 'yenny-fernanda' });
+  const sameNameShared = deriveProject({
+    'x-gateway-user': 'someone-else',
+    'x-engram-subproject': 'yenny-fernanda',
   });
-  assert.equal(bareCompoundIdentity, 'yenny-fernanda');
-  assert.equal(identityPlusSubproject, 'yenny.fernanda');
-  assert.notEqual(bareCompoundIdentity, identityPlusSubproject);
+  assert.equal(privateDefault.project, 'yenny-fernanda');
+  assert.equal(sameNameShared.project, 'yenny-fernanda');
+  assert.equal(privateDefault.isShared, false);
+  assert.equal(sameNameShared.isShared, true);
 });
